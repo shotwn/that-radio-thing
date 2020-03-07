@@ -142,6 +142,7 @@ body {
 
 #soft-bg {
   background-color: rgba(15, 15, 15, 0.5);
+  padding: 10 0;
 }
 
 #bg {
@@ -180,8 +181,16 @@ body {
     width: 360px;
   }
 
+  #devices {
+    width: 360px;
+  }
+
   #radio_meta {
     width: 300px;
+  }
+
+  #bg {
+    top: 0px;
   }
 
 }
@@ -274,7 +283,7 @@ body {
     <div id="devices">Devices<br>
       <div v-if="devices === null">No devices found.</div>
       <div v-for="device in devices" :key="device.is_active">
-        <span v-if="device.selected_device">[S]</span> <span v-if="device.is_active">[A] </span>{{ device.name }}<button v-if="!device.selected_device" v-on:click="selectDevice(device.id)">Select</button>
+        <span v-if="device.selected_device">[S]</span> <span v-if="device.is_active">[A] </span>{{ device.name }}<button v-if="!device.selected_device" v-on:click="selectDevice(device.id)" style="float:right">Select</button>
       </div>
     </div>
   </div>
