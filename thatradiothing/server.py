@@ -197,7 +197,7 @@ class WebServer(web.Application):
             return web.HTTPUnauthorized()
 
         payload= {
-            'now_playing': self.trt.master.now_playing,
+            'now_playing': self.trt.master.now_playing_track,
             'enabled': user.enabled
         }
         
@@ -205,6 +205,6 @@ class WebServer(web.Application):
     
     async def now_playing(self, request):
         payload = {
-            'now_playing': self.trt.master.now_playing
+            'now_playing': self.trt.master.now_playing_track
         }
         return web.Response(body=json.dumps(payload))

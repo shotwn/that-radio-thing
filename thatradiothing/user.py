@@ -1,4 +1,5 @@
 import json
+import re
 import aiohttp
 import datetime
 import thatradiothing.exceptions as exceptions
@@ -27,6 +28,11 @@ class User:
         self.paused_cycles = 0
 
         self.pass_sync_for_cycles = 0
+        self.currently_playing_cache = {
+            cached_at: None,
+            cached_data: None,
+            cached_params: None #TODO: Cache currently playing, especially for master user.
+        }
 
     async def aiohttp_session(self):
         if not self._aiohttp_session:
@@ -103,9 +109,23 @@ class User:
             if response.status != 204:
                 return False
             return True
+    
+    async def queue(self, uri):
+        queue_url = self.api + '/v1/me/player/queue'
+        payload = {
+            uri: uri
+        }
 
-    async def currently_playing(self, raise_exception = False):
-        currently_playing_url = 'https://api.spotify.com/v1/me/player/currently-playing'
+        session = await self.aiohttp_session()
+        headers = await self.auth_headers()
+        async with session.post(queue_url, payload, headers=headers) as response:
+            if response.status != 204:
+                return False
+            return True
+
+
+    async def currently_playing(self, raise_exception = False, get_next_from_context = False):
+        currently_playing_url = self.api + '/v1/me/player/currently-playing'
         session = await self.aiohttp_session()
         headers = await self.auth_headers()
         async with session.get(currently_playing_url, headers=headers) as response:
@@ -121,11 +141,47 @@ class User:
             if raise_exception:
                 if not data['is_playing']:
                     raise exceptions.PlaybackPaused()
-
+            
+            if get_next_from_context:
+                next_track = await self.next_from_context(data['context'], data['item'])
+                data['next_track'] = next_track
             return data
     
+    async def next_from_context(self, context, current_track):
+        if not context or 'type' not in context:
+            return None
+
+        if context['type'] == 'playlist':
+            playlist =  await self.get_playlist(context['uri'])
+            if not playlist['tracks'] or not playlist['tracks']['items']:
+                return None
+
+            next_track = await self.get_next_track(playlist['tracks']['items'], current_track)
+            return next_track
+
+    async def get_next_track(self, collection, current_track):
+        grab_next = False
+        for item in collection:
+            if grab_next:
+                return item['track']
+            if item['track']['uri'] == current_track['uri']:
+                grab_next = True
+
+        return None
+
+    async def get_playlist(self, uri):
+        playlist_id_r = r'playlist:(.*)'
+        playlist_id = re.search(playlist_id_r, uri).group(1)
+        playlist_url = self.api + f'/v1/playlists/{playlist_id}'
+        headers = await self.auth_headers()
+        session = await self.aiohttp_session()
+        async with session.get(playlist_url, headers=headers) as response:
+            if response.status != 200:
+                return None
+            return await response.json(content_type = None)
+
     async def pause(self):
-        pause_url = 'https://api.spotify.com/v1/me/player/pause'
+        pause_url = self.api + '/v1/me/player/pause'
         headers = await self.auth_headers()
         session = await self.aiohttp_session()
         async with session.put(pause_url, headers=headers) as response:

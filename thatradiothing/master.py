@@ -15,7 +15,9 @@ class Master:
         self.modes = {
             'MASTER_PLAYER': 0
         }
-        self.now_playing = ''
+        self.now_playing_track = None
+        self.now_playing = None
+        self.next_track = None
     
     async def beat(self):
         while True:
@@ -29,7 +31,13 @@ class Master:
     
     async def router(self):
         if self.mode == self.modes["MASTER_PLAYER"]:
-            await self.sync_to_master_user()
+            await self.sync_to_master_user() 
+
+    async def start_playback_to_user(self, user, uri, position_ms):
+        uris = [uri]
+        if self.next_playing:
+            uris.append(self.next_playing['uri'])
+        await user.play(uris=uris, position_ms=position_ms) # Start playback
 
     async def sync_to_master_user(self):
         if not self.master_user:
@@ -40,14 +48,15 @@ class Master:
             if not user.access_token: # Not logged in pass.
                 continue
             if user == self.master_user: # Master user. Get now playing then pass.
+                # This part is only for meta. Master user now playing is fetched in every sync check seperately.
                 if len(self.trt.users) == 1 and user.enabled: # When there is only master.
                     master_user_playing = await self.master_user.currently_playing()
-                    self.now_playing = master_user_playing['item']
+                    self.now_playing_track = master_user_playing['item']
                 continue
             if user.pass_sync_for_cycles > 0: # Pauses user sync for X amount of cycles.
                 user.pass_sync_for_cycles += -1
                 continue
-            if not user.enabled: # User disabled pass.
+            if not user.enabled: # User is disabled pass.
                 continue
             if user.paused_cycles > 10: # Paused for too long. Disable.
                 user.enabled = False
@@ -57,7 +66,7 @@ class Master:
 
             # Get master info
             
-            master_user_playing = await self.master_user.currently_playing()
+            master_user_playing = await self.master_user.currently_playing(get_next_from_context=True)
             request_will_start_at = time.time()
             if not master_user_playing:
                 continue
@@ -67,7 +76,9 @@ class Master:
                 master_is_playing = master_user_playing['is_playing']
                 master_progress = master_user_playing['progress_ms']
                 master_fetched_at = master_user_playing['timestamp']
-                self.now_playing = master_user_playing['item']
+                self.now_playing_track = master_user_playing['item']
+                self.now_playing = master_user_playing
+                self.next_playing = master_user_playing['next_track']
             except TypeError:
                 continue
 
@@ -95,7 +106,7 @@ class Master:
                     logger.debug('User is not playing, try to play.')
                     
                     request_delta = int((time.time() - request_will_start_at)*1000)
-                    await user.play(uris=[master_uri], position_ms=master_progress + request_delta) # Start playback
+                    await self.start_playback_to_user(user, master_uri, master_progress + request_delta)
                     continue # We are done here.
             except exceptions.NoActiveDevice:
                 logger.debug('Device not found, trying to select first device.')
@@ -106,13 +117,14 @@ class Master:
             # User is playing. From here we will sync stuff.
             # Calculate required times.
             request_delta = int((time.time() - request_will_start_at)*1000)
-            timestamp_delta = math.floor((user_playing['timestamp'] - master_fetched_at)/100)
+            # timestamp_delta = math.floor((user_playing['timestamp'] - master_fetched_at)/100)
             fine_progress_ms = master_progress + request_delta
             
             # User is not playing same thing as master. Start playback. (play)
             if user_playing['item']['uri'] != master_uri:
                 logger.debug('User not playing correct uri, play.')
-                await user.play(uris=[master_uri], position_ms=fine_progress_ms)
+
+                await self.start_playback_to_user(user, master_uri, fine_progress_ms)
                 continue
             
             # User's deltas are outside tolerances. Do time sync. (seek)
@@ -124,7 +136,7 @@ class Master:
                     f"> user:   { user_playing['progress_ms'] }\n"
                     f"> delta:  {(master_progress - user_playing['progress_ms'])/1000} seconds\n"
                     f"| Master Progress | {master_progress}\n"
-                    f"| TimeStamp Delta | {timestamp_delta}\n"
+                    # f"| TimeStamp Delta | {timestamp_delta}\n"
                     f"|  Request Delta  | {request_delta}\n"
                     f"|  Fine Progress  | {fine_progress_ms}\n"))
                 
