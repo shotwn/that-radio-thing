@@ -89,43 +89,45 @@ class Master:
 
 
             # Get user info
-
             try:
-                try:
-                    user_playing = await user.currently_playing(raise_exception=True)
-                
-                # No playback states. Pause or No Content
-                except (exceptions.NoContent, exceptions.PlaybackPaused) as exc:
-                    if isinstance(exc, exceptions.PlaybackPaused): # Paused
-                        if user.play_if_paused: # Hit this after re-enable, prevent pass due pause.
-                            user.play_if_paused = False
-                        elif master_is_playing and master_progress > 4000: # User paused it, play if paused was not triggered. TODO:this is sketchy
-                            user.paused_cycles += 1
-                            continue # Pass.
-
-                    logger.debug('User is not playing, try to play.')
-                    
-                    request_delta = int((time.time() - request_will_start_at)*1000)
-                    await self.start_playback_to_user(user, master_uri, master_progress + request_delta)
-                    continue # We are done here.
-            except exceptions.NoActiveDevice:
-                logger.debug('Device not found, trying to select first device.')
-
-                await user.select_device(0, first_one=True)
-                continue
+                user_playing = await user.currently_playing(raise_exception=True)
             
-            # User is playing. From here we will sync stuff.
+            # No playback states. Pause or No Content
+            except (exceptions.NoContent, exceptions.PlaybackPaused) as exc:
+                if isinstance(exc, exceptions.PlaybackPaused): # Paused
+                    if user.play_if_paused: # Hit this after re-enable, prevent pass due pause.
+                        user.play_if_paused = False
+                    elif master_is_playing and master_progress > 4000: # User paused it, play if paused was not triggered. TODO:this is sketchy
+                        user.paused_cycles += 1
+                        continue # Pass.
+                """
+                request_delta = int((time.time() - request_will_start_at)*1000)
+                await self.start_playback_to_user(user, master_uri, master_progress + request_delta)
+                continue # We are done here.
+                """
+                logger.debug('User is not playing, setting flag to try to play.')
+                user_playing = None # This will trigger playback.
+
+            # From here on we will sync stuff.
             # Calculate required times.
             request_delta = int((time.time() - request_will_start_at)*1000)
             # timestamp_delta = math.floor((user_playing['timestamp'] - master_fetched_at)/100)
             fine_progress_ms = master_progress + request_delta
             
-            # User is not playing same thing as master. Start playback. (play)
-            if user_playing['item']['uri'] != master_uri:
-                logger.debug('User not playing correct uri, play.')
+            # User is not playing at all or not playing same thing as master. Start playback. (play)
+            if not user_playing or user_playing['item']['uri'] != master_uri:
+                if not user_playing:
+                    logger.debug('User not playing, play.')
+                else:
+                    logger.debug('User not playing correct URI, play.')
 
-                await self.start_playback_to_user(user, master_uri, fine_progress_ms)
-                continue
+                try:
+                    await self.start_playback_to_user(user, master_uri, fine_progress_ms)
+                    continue
+                except exceptions.NoActiveDevice:
+                    logger.debug('Device not found, trying to select the first device.')
+                    await user.select_device(0, first_one=True)
+                    continue
             
             # User's deltas are outside tolerances. Do time sync. (seek)
             if user_playing['progress_ms'] > master_progress + self.trt.realtime_tolerance_ms or user_playing['progress_ms'] < master_progress - self.trt.realtime_tolerance_ms:
