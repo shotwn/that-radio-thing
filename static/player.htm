@@ -53,6 +53,7 @@ body {
 }
 #play_stop {
   position: relative;
+  min-height: 36px;
 }
 #play_stop i {
     border-radius: 7px;
@@ -70,13 +71,30 @@ body {
     margin: 2px;
 }
 
-#master_button {
+.master_button {
+  position: absolute;
+  transition: all 1s linear;
+  bottom: -9;
+  left: 20;
+  width: 18px;
+  height: 18px;
+  font-size: auto;
+}
+
+.master_button_ready {
   width: 11px !important;
   height: 11px !important;
   font-size: 11px !important;
-  position: absolute;
-  bottom: -9;
-  left: 20;
+}
+
+.master_button_active {
+  /* width: 11px !important; */
+  /* height: 11px !important; */
+  /* font-size: 11px !important; */
+  color: red !important;
+  animation: opacity-soft 4s infinite;
+  left: 0px;
+  bottom: 0px;
 }
 
 #radio_meta {
@@ -136,10 +154,6 @@ body {
     height: 100%;
     object-fit: contain;
     overflow: hidden;
-}
-
-.breath {
-  animation: opacity-soft 4s infinite;
 }
 
 @keyframes opacity-true {
@@ -206,9 +220,18 @@ body {
 <div id="app">
   <div id="radio">
     <div id="play_stop">
-      <i v-if="!status.enabled" v-on:click="enable()" class="fas fa-play"></i>
-      <i v-if="status.enabled" v-on:click="disable()" class="fas fa-stop"></i>
-      <i :key="user_profile.is_master" v-bind:class="{ breath: checkIfMaster() }" id="master_button" v-if="user_profile ? user_profile.can_be_master : false" v-on:click="beMaster()" class="fas fa-satellite-dish"></i>
+      <template v-if="user_profile && !user_profile.is_master">
+        <i v-if="!status.enabled" v-on:click="enable()" class="fas fa-play"></i>
+        <i v-if="status.enabled" v-on:click="disable()" class="fas fa-stop"></i>
+      </template>
+      <i 
+        id="master_button"
+        class="fas fa-satellite-dish master_button"
+        :key="user_profile.is_master"
+        v-bind:class="{ master_button_active: checkIfMaster(), master_button_ready: !checkIfMaster() }"
+        v-if="user_profile ? user_profile.can_be_master : false" 
+        v-on:click="toggleMaster()"
+      ></i>
     </div>
     <div id="right">
         <div v-if="status.now_playing != undefined && status.now_playing != ''" id="radio_meta">
@@ -279,13 +302,36 @@ player = new Vue({
             this.user_profile = response.data;
           })
       },
+      toggleMaster() {
+        if (this.user_profile && this.user_profile.is_master) {
+          this.resign()
+        } else {
+          this.beMaster()
+        }
+      },
       beMaster() {
+        this.user_profile.is_master = true
         axios.get('/master')
         .then(response => {
           if(response.status == 200) {
             this.user_profile.is_master = true
           }
         })
+        .catch(response => {
+          this.user_profile.is_master = false
+        })
+      },
+      resign() {
+        this.user_profile.is_master = false
+        axios.get('/resign')
+          .then(response => {
+            if(response.status == 200) {
+              this.user_profile.is_master = false
+            }
+          })
+          .catch(response => {
+            this.user_profile.is_master = true
+          })
       },
       enable() {
         axios.get('/enable')
@@ -319,7 +365,7 @@ player = new Vue({
         if(this.user_profile == null) {
           return false
         }
-        console.log(this.user_profile.is_master)
+        // console.log(this.user_profile.is_master)
         return this.user_profile.is_master
       },
       setBodyBackground() {
