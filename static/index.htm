@@ -1,0 +1,77 @@
+<script src="https://cdn.jsdelivr.net/npm/vue/dist/vue.js"></script>
+<script src="https://unpkg.com/axios/dist/axios.min.js"></script>
+<style>
+body {
+    color: white;
+    font-family: Tahoma, Geneva, sans-serif;
+    font-size:12px;
+    text-align: center;
+    background-color: #000000
+}
+body a:link, body a:visited, body a:hover, body a:active{
+  color:turquoise;
+  cursor: pointer;
+  text-decoration: none;
+}
+.img-overlay {
+    position: absolute;
+    top:0;
+    left:0;
+    right:0;
+    width: 100%;
+    background-color: rgba(15, 15, 15, 0.5);
+    min-height: 50px;
+    padding:5px;
+}
+</style>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<div id="app">
+    Welcome, to listen stream <a href='#' v-on:click='authorize'>login using spotify.</a>
+    <h6>Now Playing</h6>
+    <div style='position:relative' v-if="status != null && status.now_playing != ''">
+        <img width='100%' :src="status.now_playing.album.images[0].url" />
+        <div class='img-overlay'>{{status.now_playing.artists[0].name}} - {{status.now_playing.name}}</div>
+        
+    </div>
+</div>
+<script>
+player = new Vue({
+    el: '#app',
+    data () {
+        return {
+            status: null
+        }
+    },
+    methods: {
+        getStatus() {
+        axios
+          .get('/api/now_playing')
+          .then(response => {
+            this.status = response.data
+            //console.log(response.data)
+          })
+        },
+        authorize() {
+            var win = window.open("/auth",'width=400,height=400,scrollbars=1');
+            var timer = setInterval(function() { 
+                if(win.closed) {
+                    clearInterval(timer);
+                    console.log('window is closed.')
+                    axios
+                        .get('/status')
+                        .then(response => {
+                            window.location.href = '/player'
+                        })
+                }
+            }, 1000)
+        }
+    },
+    mounted() {
+        this.getStatus()
+    }
+})
+
+setInterval(() => {
+  player.getStatus()
+}, 2000)
+</script>
