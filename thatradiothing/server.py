@@ -22,6 +22,7 @@ class WebServer(web.Application):
             web.get('/devices', self.devices),
             web.post('/devices', self.set_active_device),
             web.get('/master', self.set_master_user),
+            web.get('/resign', self.resign_master_user),
             web.get('/profile', self.profile),
             web.get('/enable', self.enable),
             web.get('/disable', self.disable),
@@ -151,12 +152,23 @@ class WebServer(web.Application):
             self.trt.master.master_user = user
             # Select Master's first device. 
             # Normally 'play' does this automatically but master does not receive play API calls.
-            await self.trt.master.master_user.select_device(0, True)
+            await self.trt.master.master_user.selected_device()
 
             logger.info('NEW MASTER USER')
             logger.info(user.spotify_profile['display_name'])
             return web.Response(body='OK')
         
+        return web.HTTPUnauthorized()
+    
+    async def resign_master_user(self, request):
+        user = await self.logged_in_user(request)
+        if not user:
+            return web.HTTPUnauthorized()
+        
+        if user.spotify_profile['can_be_master'] and user == self.trt.master.master_user:
+            self.trt.master.master_user = None # TODO: maybe bot here ?
+            return web.Response(body='OK')
+
         return web.HTTPUnauthorized()
     
     async def profile(self, request):
