@@ -142,7 +142,7 @@ class User:
                 if not data['is_playing']:
                     raise exceptions.PlaybackPaused()
             
-            if get_next_from_context:
+            if get_next_from_context and data and 'context' in data:
                 next_track = await self.next_from_context(data['context'], data['item'])
                 data['next_track'] = next_track
             return data
