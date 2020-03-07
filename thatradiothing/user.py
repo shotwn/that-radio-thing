@@ -29,9 +29,9 @@ class User:
 
         self.pass_sync_for_cycles = 0
         self.currently_playing_cache = {
-            cached_at: None,
-            cached_data: None,
-            cached_params: None #TODO: Cache currently playing, especially for master user.
+            'cached_at': None,
+            'cached_data': None,
+            'cached_params': None #TODO: Cache currently playing, especially for master user.
         }
 
     async def aiohttp_session(self):
@@ -201,6 +201,7 @@ class User:
                 return []
             
             devices = await response.json(content_type=None)
+
             for device in devices["devices"]:
                 device["selected_device"] = (str(device['id']) == str(self._selected_device if self._selected_device else ' NONE '))
             return devices

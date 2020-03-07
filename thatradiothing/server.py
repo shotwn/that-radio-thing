@@ -149,6 +149,10 @@ class WebServer(web.Application):
 
         if user.spotify_profile['can_be_master']:
             self.trt.master.master_user = user
+            # Select Master's first device. 
+            # Normally 'play' does this automatically but master does not receive play API calls.
+            await self.trt.master.master_user.select_device(0, True)
+
             logger.info('NEW MASTER USER')
             logger.info(user.spotify_profile['display_name'])
             return web.Response(body='OK')
