@@ -140,6 +140,10 @@ body {
   animation: opacity-reverse 10s infinite;
 }
 
+#soft-bg {
+  background-color: rgba(15, 15, 15, 0.5);
+}
+
 #bg {
   width: 100%;
   height: calc(100% - 50px);
@@ -244,32 +248,34 @@ body {
 </style>
 <meta name="viewport" content="maximum-scale=1, initial-scale=1">
 <div id="app">
-  <div id="radio">
-    <div id="play_stop">
-      <template v-if="user_profile && !user_profile.is_master">
-        <i v-if="!status.enabled" v-on:click="enable()" class="fas fa-play"></i>
-        <i v-if="status.enabled" v-on:click="disable()" class="fas fa-stop"></i>
-      </template>
-      <i 
-        id="master_button"
-        class="fas fa-satellite-dish master_button"
-        :key="user_profile.is_master"
-        v-bind:class="{ master_button_active: checkIfMaster(), master_button_ready: !checkIfMaster() }"
-        v-if="user_profile ? user_profile.can_be_master : false" 
-        v-on:click="toggleMaster()"
-      ></i>
+  <div id="soft-bg">
+    <div id="radio">
+      <div id="play_stop">
+        <template v-if="user_profile && !user_profile.is_master">
+          <i v-if="!status.enabled" v-on:click="enable()" class="fas fa-play"></i>
+          <i v-if="status.enabled" v-on:click="disable()" class="fas fa-stop"></i>
+        </template>
+        <i 
+          id="master_button"
+          class="fas fa-satellite-dish master_button"
+          :key="user_profile.is_master"
+          v-bind:class="{ master_button_active: checkIfMaster(), master_button_ready: !checkIfMaster() }"
+          v-if="user_profile ? user_profile.can_be_master : false" 
+          v-on:click="toggleMaster()"
+        ></i>
+      </div>
+      <div id="right">
+          <div v-if="status.now_playing != undefined && status.now_playing != ''" id="radio_meta">
+              <div id="radio_meta_artist"><a target="_blank" :href="status.now_playing.artists[0].external_urls.spotify"> {{status.now_playing.artists[0].name}}</a></div>
+              <div id="radio_meta_song"><a target="_blank" :href="status.now_playing.external_urls.spotify">{{status.now_playing.name}}</a></div>
+          </div>
+      </div>
     </div>
-    <div id="right">
-        <div v-if="status.now_playing != undefined && status.now_playing != ''" id="radio_meta">
-            <div id="radio_meta_artist"><a target="_blank" :href="status.now_playing.artists[0].external_urls.spotify"> {{status.now_playing.artists[0].name}}</a></div>
-            <div id="radio_meta_song"><a target="_blank" :href="status.now_playing.external_urls.spotify">{{status.now_playing.name}}</a></div>
-        </div>
-    </div>
-  </div>
-  <div id="devices">Devices<br>
-    <div v-if="devices === null">No devices found.</div>
-    <div v-for="device in devices" :key="device.is_active">
-      <span v-if="device.selected_device">[S]</span> <span v-if="device.is_active">[A] </span>{{ device.name }}<button v-if="!device.selected_device" v-on:click="selectDevice(device.id)">Select</button>
+    <div id="devices">Devices<br>
+      <div v-if="devices === null">No devices found.</div>
+      <div v-for="device in devices" :key="device.is_active">
+        <span v-if="device.selected_device">[S]</span> <span v-if="device.is_active">[A] </span>{{ device.name }}<button v-if="!device.selected_device" v-on:click="selectDevice(device.id)">Select</button>
+      </div>
     </div>
   </div>
   <div v-if="status.now_playing != undefined && status.now_playing != ''" id="bg">
