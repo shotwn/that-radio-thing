@@ -71,7 +71,7 @@ class User:
             self.last_refresh = datetime.datetime.now()
 
             await self.users_profile()
-            logger.info(pformat(vars(self)))
+            # logger.info(pformat(vars(self)))
             return True
 
     async def auth_headers(self):
