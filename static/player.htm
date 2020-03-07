@@ -156,6 +156,17 @@ body {
     overflow: hidden;
 }
 
+.img-overlay {
+    position: absolute;
+    top:0;
+    left:0;
+    right:0;
+    width: 100%;
+    background-color: rgba(15, 15, 15, 0.5);
+    min-height: 50px;
+    padding:5px;
+}
+
 @keyframes opacity-true {
   /* You could think of as "step 1" */
   0% {
@@ -247,7 +258,7 @@ body {
     </div>
   </div>
   <div v-if="status.now_playing != undefined && status.now_playing != ''" id="bg">
-    <img id="bg-img" :src="status.now_playing.album.images[0].url" />
+    <img class="img-overlay" :src="status.now_playing.album.images[0].url" />
   </div>
 </div>
 
