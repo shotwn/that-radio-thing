@@ -1,41 +1,39 @@
 <script src="https://cdn.jsdelivr.net/npm/vue/dist/vue.js"></script>
 <script src="https://unpkg.com/axios@0.19.2/dist/axios.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/color-thief/2.0.1/color-thief.min.js" integrity="sha256-fYYt9VmuVbEV36uYrcq2OswibsiRsM+kBL8tJsMpVwk=" crossorigin="anonymous"></script>
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.8.2/css/all.min.css" integrity="sha256-BtbhCIbtfeVWGsqxk1vOHEYXS6qcvQvLMZqjtpWUEx8=" crossorigin="anonymous" />
-
+<script
+  src="https://cdnjs.cloudflare.com/ajax/libs/color-thief/2.0.1/color-thief.min.js"
+  integrity="sha256-fYYt9VmuVbEV36uYrcq2OswibsiRsM+kBL8tJsMpVwk="
+  crossorigin="anonymous"
+></script>
+<link
+  rel="stylesheet"
+  href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.8.2/css/all.min.css"
+  integrity="sha256-BtbhCIbtfeVWGsqxk1vOHEYXS6qcvQvLMZqjtpWUEx8="
+  crossorigin="anonymous"
+/>
 
 <style>
-body {
-  margin: 0px;
-  background-color: #000000 !important;
-  background-size: contain !important;
-}
-#devices {
-  margin-left: auto;
-  margin-right: auto;
-  background-color: #191919;
-  width: 154px;
-  border-color: #464646;
-  border-style: solid;
-  border-radius: 5px;
-  border-width: 1px;
-  padding: 3px;
-  text-align: left;
-  font-family: Tahoma, Geneva, sans-serif;
-  color:white;
-  z-index: 2;
-  font-size: 10px;
-}
-
-#devices button {
-  border-radius: 7px;
-  color: #093200;
-  border-color: #093200;
-  border-width: 2px;
-  border-style: solid;
-}
-
-#radio {
+  * {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+  }
+  body {
+    margin: 0px;
+    background-color: #000000 !important;
+    background-size: contain !important;
+  }
+  #logo {
+    text-align: center;
+    padding-bottom: 10px;
+    display: none;
+  }
+  #logo img {
+    width: 50px;
+  }
+  #devices {
+    margin-left: auto;
+    margin-right: auto;
     background-color: #191919;
     width: 154px;
     border-color: #464646;
@@ -45,17 +43,62 @@ body {
     padding: 3px;
     text-align: left;
     font-family: Tahoma, Geneva, sans-serif;
-    height: 39px;
+    color: white;
+    font-size: 10px;
+    z-index: 3;
+  }
+
+  #devices button {
+    border-radius: 7px;
+    color: #093200;
+    border-color: #093200;
+    border-width: 2px;
+    border-style: solid;
+    float:right;
+    font-size: 11px;
+    padding: 3px;
+    cursor: pointer;
+  }
+  #devices div {
+    min-height: 19px;
+    padding-left: 5px;
+  }
+
+  #devices div::after {
+    content: "";
+    display: table;
+    clear: both;
+  }
+
+  #devices span {
+    padding-top: 4px;
+    display: inline-block;
+  }
+
+  #radio {
+    background-color: #191919;
+    width: 154px;
+    border-color: #464646;
+    border-style: solid;
+    border-radius: 5px;
+    border-width: 1px;
+    padding: 3px;
+    text-align: left;
+    font-family: Tahoma, Geneva, sans-serif;
+    height: 44px;
     margin-left: auto;
     margin-right: auto;
     margin-bottom: 10px;
     position: relative;
-}
-#play_stop {
-  position: relative;
-  min-height: 36px;
-}
-#play_stop i {
+  }
+  #play_stop {
+    position: relative;
+    min-height: 36px;
+    z-index: 5;
+    max-width: 50px;
+  }
+  #play_stop i {
+    box-sizing: content-box;
     border-radius: 7px;
     padding: 5px;
     background-color: #fff;
@@ -69,101 +112,150 @@ body {
     font-size: 18px;
     cursor: pointer;
     margin: 2px;
-}
+  }
 
-.master_button {
-  position: absolute;
-  transition: all 1s linear;
-  bottom: -9;
-  left: 20;
-  width: 18px;
-  height: 18px;
-  font-size: auto;
-}
+  .master_button {
+    position: absolute;
+    transition: all 1s linear;
+    bottom: -5;
+    left: 20;
+    width: 18px;
+    height: 18px;
+    font-size: auto;
+  }
 
-.master_button_ready {
-  width: 11px !important;
-  height: 11px !important;
-  font-size: 11px !important;
-}
+  .master_button_ready {
+    width: 9px !important;
+    height: 9px !important;
+    font-size: 9px !important;
+  }
 
-.master_button_active {
-  /* width: 11px !important; */
-  /* height: 11px !important; */
-  /* font-size: 11px !important; */
-  color: red !important;
-  animation: opacity-soft 4s infinite;
-  left: 0px;
-  bottom: 0px;
-}
+  .master_button_active {
+    /* width: 11px !important; */
+    /* height: 11px !important; */
+    /* font-size: 11px !important; */
+    color: red !important;
+    animation: opacity-soft 4s infinite;
+    left: 0px;
+    bottom: 0px;
+  }
 
-#radio_meta {
+  #radio_meta {
     clear: both;
     display: block;
     overflow: hidden;
     white-space: nowrap;
-    width: 113px;
+    width: 110px;
     font-size: 11px;
     position: relative;
     top: 5px;
     height: 13px;
-}
+  }
 
-#radio_meta div {
-    width: auto;
+  #radio_meta div {
+    width: 100%;
     position: absolute;
-}
+  }
 
-#right {
-  position: absolute;
-  top: 0;
-  right: 0;
-  color:white;
-}
+  #right {
+    position: absolute;
+    top: 0;
+    right: 2;
+    color: white;
+    min-height: 42px;
+  }
 
-#right a:link, #right a:visited, #right a:hover, #right a:active{
-  color: white;
-  cursor:pointer;
-  text-decoration: none;
-}
+  #right a:link,
+  #right a:visited,
+  #right a:hover,
+  #right a:active {
+    color: white;
+    cursor: pointer;
+    text-decoration: none;
+  }
 
-#radio_meta div {
-  width:100%;
-}
+  #right #radio_meta_2 {
+    font-size: 9;
+    clear: both;
+    color:rgba(255, 255, 255, 0.72);
+    height: 13px;
+    top: 10px;
+    position: relative;
+    white-space: nowrap;
+    overflow: visible;
+    width: 110px;
+  }
 
-#radio_meta_artist {
-  opacity: 0;
-  animation: opacity-true 10s infinite;
-}
+  #right #radio_meta_2 a:link,
+  #right #radio_meta_2 a:visited,
+  #right #radio_meta_2 a:hover,
+  #right #radio_meta_2 a:active {
+    color:rgba(255, 255, 255, 0.80);
+  }
 
-#radio_meta_song {
-  animation: opacity-reverse 10s infinite;
-}
+  #radio_meta_2 div {
+    display: inline-block;
+  }
 
-#soft-bg {
-  background-color: rgba(15, 15, 15, 0.5);
-  padding: 10 0;
-}
+  #message {
+    color: red;
+  }
 
-#bg {
-  width: 100%;
-  height: calc(100% - 50px);
-  position: absolute;
-  z-index: -1;
-  top: 50px;
-  left:0;
-}
+  #radio_meta_artist {
+    opacity: 0;
+    animation: opacity-true 10s infinite;
+  }
 
-#bg img {
-  /*
+  #radio_meta_song {
+    animation: opacity-reverse 10s infinite;
+  }
+
+  #more_options {
+    position: fixed;
+    display: block;
+    background-color: rgba(15, 15, 15, 0.5);
+    color: white;
+    border-radius: 10px;
+    padding: 10px;
+    z-index: 4;
+    font-size: 13px;
+  }
+
+  #more_options a:link,
+  #more_options a:visited,
+  #more_options a:hover,
+  #more_options a:active {
+    color: white;
+    cursor: pointer;
+    text-decoration: none;
+  }
+
+  #soft-bg {
+    background-color: rgba(15, 15, 15, 0.5);
+    padding: 10 0;
+    z-index: 2;
+    position: relative;
+  }
+
+  #bg {
+    width: 100%;
+    height: calc(100% - 50px);
+    position: absolute;
+    z-index: 1;
+    top: 50px;
+    left: 0;
+  }
+
+  #bg img {
+    /*
     width: 100%;
     height: 100%;
     object-fit: contain;
     overflow: hidden;
     */
-}
+  }
 
-.img-overlay {
+  .img-overlay {
     /*position: absolute;
     top:0;
     left:0;
@@ -173,257 +265,403 @@ body {
     width: 100%;
     background-color: rgba(15, 15, 15, 0.5);
     min-height: 50px;
-    padding:5px;
-}
-
-@media (min-width: 400px) {
-  #radio {
-    width: 360px;
+    padding: 5px;
+    object-position: 50% 0%;
+    transition: all 5s linear;
   }
 
-  #devices {
-    width: 360px;
+  @media (min-width: 359px) {
+    #logo {
+      display: block;
+    }
+    #radio {
+      width: 310px;
+      z-index: 3;
+    }
+
+    #devices {
+      width: 310px;
+    }
+
+    #radio_meta {
+      width: 300px;
+      text-align: center;
+      font-size: 13;
+      top: 4;
+    }
+
+    #right {
+      width: 100%;
+      overflow: hidden;
+    }
+
+    #right #radio_meta {
+      overflow: visible;
+      width: 215px;
+      margin-right: auto;
+      margin-left: auto;
+    }
+
+    #right #radio_meta_2 {
+      text-align: center;
+      font-size: 12;
+      width: 205px;
+      margin-right: auto;
+      margin-left: auto;
+    }
+
+    #right #radio_meta_2 div {
+      /*position: absolute;
+      width: 100%;*/
+      display: inline-block;
+    }
+
+    #broadcaster {
+      z-index: 4;
+    }
+
+    #bg {
+      top: 0px;
+    }
   }
 
-  #radio_meta {
-    width: 300px;
+  @keyframes opacity-true {
+    /* You could think of as "step 1" */
+    0% {
+      opacity: 0;
+    }
+    /* You could think of as "step 2" */
+    48% {
+      opacity: 0;
+    }
+    50% {
+      opacity: 1;
+    }
+    98% {
+      opacity: 1;
+    }
+    100% {
+      opacity: 0;
+    }
   }
 
-  #bg {
-    top: 0px;
+  @keyframes opacity-reverse {
+    /* You could think of as "step 1" */
+    0% {
+      opacity: 1;
+    }
+    /* You could think of as "step 2" */
+    48% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0;
+    }
+    98% {
+      opacity: 0;
+    }
+    100% {
+      opacity: 1;
+    }
   }
 
-}
-
-@keyframes opacity-true {
-  /* You could think of as "step 1" */
-  0% {
-    opacity: 0
+  @keyframes opacity-soft {
+    /* You could think of as "step 1" */
+    0% {
+      opacity: 1;
+    }
+    /* You could think of as "step 2" */
+    30% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.2;
+    }
+    80% {
+      opacity: 1;
+    }
+    100% {
+      opacity: 1;
+    }
   }
-  /* You could think of as "step 2" */
-  48% {
-    opacity: 0
-  }
-  50% {
-    opacity: 1
-  }
-  98% {
-    opacity: 1
-  }
-  100% {
-    opacity: 0
-  }
-}
-
-@keyframes opacity-reverse {
-  /* You could think of as "step 1" */
-  0% {
-    opacity: 1
-  }
-  /* You could think of as "step 2" */
-  48% {
-    opacity: 1
-  }
-  50% {
-    opacity: 0
-  }
-  98% {
-    opacity: 0
-  }
-  100% {
-    opacity: 1
-  }
-}
-
-@keyframes opacity-soft{
-  /* You could think of as "step 1" */
-  0% {
-    opacity: 1
-  }
-  /* You could think of as "step 2" */
-  30% {
-    opacity: 1
-  }
-  50% {
-    opacity: 0.2
-  }
-  80% {
-    opacity: 1
-  }
-  100% {
-    opacity: 1
-  }
-}
 </style>
-<meta name="viewport" content="maximum-scale=1, initial-scale=1">
+<meta name="viewport" content="maximum-scale=1, initial-scale=1" />
 <div id="app">
   <div id="soft-bg">
+    <div id="logo">
+      <img src="/logo" />
+    </div>
     <div id="radio">
       <div id="play_stop">
         <template v-if="user_profile && !user_profile.is_master">
-          <i v-if="!status.enabled" v-on:click="enable()" class="fas fa-play"></i>
-          <i v-if="status.enabled" v-on:click="disable()" class="fas fa-stop"></i>
+          <i
+            v-if="!status.enabled"
+            v-on:click="enable()"
+            class="fas fa-play"
+          ></i>
+          <i
+            v-if="status.enabled"
+            v-on:click="disable()"
+            class="fas fa-stop"
+          ></i>
         </template>
-        <i 
+        <i
           id="master_button"
           class="fas fa-satellite-dish master_button"
           :key="user_profile.is_master"
           v-bind:class="{ master_button_active: checkIfMaster(), master_button_ready: !checkIfMaster() }"
-          v-if="user_profile ? user_profile.can_be_master : false" 
+          v-if="user_profile ? user_profile.can_be_master : false"
           v-on:click="toggleMaster()"
         ></i>
       </div>
       <div id="right">
-          <div v-if="status.now_playing != undefined && status.now_playing != ''" id="radio_meta">
-              <div id="radio_meta_artist"><a target="_blank" :href="status.now_playing.artists[0].external_urls.spotify"> {{status.now_playing.artists[0].name}}</a></div>
-              <div id="radio_meta_song"><a target="_blank" :href="status.now_playing.external_urls.spotify">{{status.now_playing.name}}</a></div>
+        <div
+          v-if="status.now_playing != undefined && status.now_playing != null"
+          id="radio_meta"
+        >
+          <div id="radio_meta_artist">
+            <a
+              target="_blank"
+              :href="status.now_playing.artists[0].external_urls.spotify"
+            >
+              {{status.now_playing.artists[0].name}}</a
+            >
           </div>
+          <div id="radio_meta_song">
+            <a target="_blank" :href="status.now_playing.external_urls.spotify"
+              >{{status.now_playing.name}}</a
+            >
+          </div>
+        </div>
+        <div id="radio_meta_2">
+          <div id="message" v-if="user_profile && user_profile.message != ''">
+            {{user_profile.message}}
+          </div>
+          <template v-else>
+            <div
+              v-if="status.master_user && status.master_user.display_name"
+              id="broadcaster"
+              title="Broadcaster"
+            >
+              <a :href="status.master_user.external_url" target="blank">
+                <i class="fas fa-podcast"></i> {{status.master_user.display_name}}
+              </a>
+            </div>
+            <div
+              v-if="status.listeners"
+              id="listeners"
+              title="Current Listeners"
+            >
+              <i class="fas fa-headphones"></i> {{status.listeners}}
+            </div>
+          </template>
+        </div>
       </div>
     </div>
-    <div id="devices">Devices<br>
+    <div id="devices">
+      <h5>Devices</h5>
       <div v-if="devices === null">No devices found.</div>
       <div v-for="device in devices" :key="device.is_active">
-        <span v-if="device.selected_device">[S]</span> <span v-if="device.is_active">[A] </span>{{ device.name }}<button v-if="!device.selected_device" v-on:click="selectDevice(device.id)" style="float:right">Select</button>
+        <span v-if="device.selected_device">[S]</span>
+        <span v-if="device.is_active">[A] </span>
+        <span> {{ device.name }} </span>
+        <button
+          v-if="!device.selected_device"
+          v-on:click="selectDevice(device.id)"
+        >Select
+        </button>
       </div>
     </div>
   </div>
-  <div v-if="status.now_playing != undefined && status.now_playing != ''" id="bg">
-    <img class="img-overlay" :src="status.now_playing.album.images[0].url" />
+  <div
+    v-if="status.now_playing != undefined && status.now_playing != ''"
+    id="bg"
+    v-on:click="openMoreOptions($event)"
+  >
+    <img
+      class="img-overlay"
+      v-if="status.now_playing"
+      v-bind:style="{ objectPosition: '50% ' + status.progress + '%' }"
+      :src="status.now_playing.album.images[0].url"
+    />
+  </div>
+  <div
+    id="more_options"
+    v-if="status.now_playing"
+    v-show="more_options.show"
+    v-bind:style="moreOptionsStyle()"
+    @mouseout="timeoutMoreOptions()"
+    @mouseover="clearTimeoutMoreOptions()"
+  >
+    <a target="_blank" :href="status.now_playing.album.external_urls.spotify">Go to Album: {{status.now_playing.album.name}}</a>
   </div>
 </div>
 
-
 <script>
-player = new Vue({
-  el: '#app',
-  data () {
-    return {
-      devices: null,
-      user_profile: null,
-      status: {
-        enabled: false
-      }
-    }
-  },
-  mounted () {
-    this.getDevices()
-    this.getUserProfile()
-    this.getStatus()
-  },
-  methods: {
+  player = new Vue({
+    el: "#app",
+    data() {
+      return {
+        devices: null,
+        user_profile: null,
+        status: {
+          enabled: false,
+          progress: 0
+        },
+        more_options: {
+          x: 0,
+          revX: false,
+          y: 0,
+          revY: false,
+          show: false,
+          timeout: false
+        }
+      };
+    },
+    mounted() {
+      this.getDevices();
+      this.getUserProfile();
+      this.getStatus();
+    },
+    methods: {
       getDevices() {
-        axios
-          .get('/devices')
-          .then(response => {
-            this.devices = response.data.devices;
-            console.log(response.data)
-          })
+        axios.get("/devices").then(response => {
+          this.devices = response.data.devices;
+          // console.log(response.data);
+        });
       },
       selectDevice(device_id) {
         data = {
-            device_id: device_id
-        }
+          device_id: device_id
+        };
         config = {
-            headers: {
-                'Content-Type': 'application/x-www-form-urlencoded'
-            }
-        }
-        axios
-            .post('/devices', data)
-            .then(response => (
-              setTimeout(() => {
-                this.getDevices()
-              }, 1000)
-            ))
+          headers: {
+            "Content-Type": "application/x-www-form-urlencoded"
+          }
+        };
+        axios.post("/devices", data).then(response =>
+          setTimeout(() => {
+            this.getDevices();
+          }, 1000)
+        );
       },
       getUserProfile() {
-        axios
-          .get('/profile')
-          .then(response => {
-            this.user_profile = response.data;
-          })
+        axios.get("/profile").then(response => {
+          this.user_profile = response.data;
+        });
       },
       toggleMaster() {
         if (this.user_profile && this.user_profile.is_master) {
-          this.resign()
+          this.resign();
         } else {
-          this.beMaster()
+          this.beMaster();
         }
       },
       beMaster() {
-        this.user_profile.is_master = true
-        axios.get('/master')
-        .then(response => {
-          if(response.status == 200) {
-            this.user_profile.is_master = true
-          }
-        })
-        .catch(response => {
-          this.user_profile.is_master = false
-        })
-      },
-      resign() {
-        this.user_profile.is_master = false
-        axios.get('/resign')
+        this.user_profile.is_master = true;
+        axios
+          .get("/master")
           .then(response => {
-            if(response.status == 200) {
-              this.user_profile.is_master = false
+            if (response.status == 200) {
+              this.user_profile.is_master = true;
             }
           })
           .catch(response => {
-            this.user_profile.is_master = true
+            this.user_profile.is_master = false;
+          });
+      },
+      resign() {
+        this.user_profile.is_master = false;
+        axios
+          .get("/resign")
+          .then(response => {
+            if (response.status == 200) {
+              this.user_profile.is_master = false;
+            }
           })
+          .catch(response => {
+            this.user_profile.is_master = true;
+          });
       },
       enable() {
-        axios.get('/enable')
-        .then(response => {
-          if(response.status == 200) {
-            this.status.enabled = true
+        axios.get("/enable").then(response => {
+          if (response.status == 200) {
+            this.status.enabled = true;
           }
-        })
+        });
       },
       disable() {
-        axios.get('/disable')
-        .then(response => {
-          console.log(response)
-          if(response.status == 200) {
-            this.status.enabled = false
+        axios.get("/disable").then(response => {
+          console.log(response);
+          if (response.status == 200) {
+            this.status.enabled = false;
           }
-        })
+        });
       },
       getStatus() {
-        axios
-          .get('/status')
-          .then(response=> {
-            this.status = response.data
-            setTimeout(()=> {
-              //this.setBodyBackground()
-            },10)
-            //console.log(response.data)
-          })
+        axios.get("/status").then(response => {
+          this.status = response.data;
+          if (response.data.master_user !== null && response.data.now_playing !== null) {
+            this.status.progress = response.data.master_user.progress_ms / response.data.now_playing.duration_ms * 100
+          }
+          
+          //console.log(response.data)
+        });
       },
       checkIfMaster() {
-        if(this.user_profile == null) {
-          return false
+        if (this.user_profile == null) {
+          return false;
         }
         // console.log(this.user_profile.is_master)
-        return this.user_profile.is_master
+        return this.user_profile.is_master;
       },
-      setBodyBackground() {
-
+      moreOptionsStyle() {
+        let style = {}
+        style.left = this.more_options.revX ? 'auto' : this.more_options.x
+        style.right = this.more_options.revX ? this.more_options.x : 'auto'
+        style.top = this.more_options.revY ? 'auto' : this.more_options.y
+        style.bottom = this.more_options.revY ? this.more_options.y : 'auto'
+        return style
+      },
+      openMoreOptions(e) {
+        this.more_options.show = true
+        this.more_options.revX = e.clientX > window.innerWidth / 2
+        this.more_options.x = this.more_options.revX  ? window.innerWidth - e.clientX : e.clientX
+        this.more_options.revY = e.clientY > window.innerHeight / 2
+        this.more_options.y = this.more_options.revY ? window.innerHeight - e.clientY : e.clientY
+        this.timeoutMoreOptions()
+      },
+      timeoutMoreOptions() {
+        // console.log("timeout")
+        if (this.more_options.timeout) {
+          clearTimeout(this.more_options.timeout)
+        }
+        this.more_options.timeout = setTimeout(() => {
+          this.more_options.show = false
+        }, 1000)
+      },
+      clearTimeoutMoreOptions() {
+        // console.log("cancel timeout")
+        if (this.more_options.timeout) {
+          clearTimeout(this.more_options.timeout)
+        }
       }
-  }
-})
+    }
+  });
 
-setInterval(() => {
+  setInterval(() => {
+    player.getStatus();
+  }, 4000);
+
+  setInterval(() => {
+    player.getDevices();
+  }, 5000);
+
+  setInterval(() => {
+    player.getUserProfile();
+  }, 5000);
+
   player.getStatus()
-}, 2000)
-
-setInterval(()=> {
-  player.getDevices()
-}, 5000)
-
-setInterval(()=> {
   player.getUserProfile()
-}, 5000)
+  player.getDevices()
 </script>
