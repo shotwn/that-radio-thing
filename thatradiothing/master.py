@@ -126,7 +126,7 @@ class Master:
             if isinstance(exc, exceptions.PlaybackPaused):  # Paused
                 if user.play_if_paused:  # Hit this after re-enable, prevent pass due pause.
                     user.play_if_paused = False
-                elif master_is_playing and master_progress > 4000:  # User paused it, play if paused was not triggered. TODO:this is sketchy
+                elif master_is_playing and master_progress > 4000:  # TODO: Sketchy, User paused it, play if paused was not triggered. TODO:this is sketchy
                     user.paused_cycles += 1
                     return  # Pass.
             """

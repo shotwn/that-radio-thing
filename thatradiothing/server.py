@@ -90,11 +90,12 @@ class WebServer(web.Application):
             if str(user.session_id) == str(state):
                 # Second step of the auth
                 user.auth_code = request.rel_url.query['code']
-                result = await user.request_tokens()
+                result = await user.request_tokens()  # also loads user profile
                 if result:
                     # await user.play('4uLU6hMCjMI75M1A2tKUQC')
                     # self.trt.master.master_user = user
                     # return web.Response(text="great success")
+                    # TODO: Logout other users with same spotify profile info
                     return web.HTTPFound('/successful_auth')
                 return web.Response(text="failed to get auth token")
         else:
