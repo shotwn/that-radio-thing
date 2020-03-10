@@ -33,7 +33,7 @@ class ThatRadioThing:
             future.result()
     
     find_user_allowed_keys = [
-        'session_id'
+        'session_id',
     ]
 
     async def find_users(self, **kwargs):

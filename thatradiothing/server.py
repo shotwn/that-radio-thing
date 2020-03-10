@@ -96,6 +96,16 @@ class WebServer(web.Application):
                     # self.trt.master.master_user = user
                     # return web.Response(text="great success")
                     # TODO: Logout other users with same spotify profile info
+                    for prev_user in self.trt.users:
+                        if prev_user == user:
+                            continue
+
+                        try:
+                            if prev_user.spotify_profile.id == user.spotify_profile.id:
+                                self.trt.users.remove(prev_user)
+                        except KeyError:
+                            continue
+
                     return web.HTTPFound('/successful_auth')
                 return web.Response(text="failed to get auth token")
         else:
