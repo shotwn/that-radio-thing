@@ -1,5 +1,8 @@
+import logging
 import logzero
 import pprint
+
+logging.basicConfig(level=logging.DEBUG)
 
 
 def format(thing):
