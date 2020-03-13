@@ -2,7 +2,7 @@ from aiohttp import web
 
 import uuid
 import json
-from logzero import logger
+from thatradiothing.logger import debug
 # from pprint import pformat
 import thatradiothing.user
 
@@ -77,16 +77,16 @@ class WebServer(web.Application):
 
         response = web.HTTPFound(redirect_to)
         user = thatradiothing.user.User(self.trt, state, redirect_uri, client_id, self.trt.client_secret)
-        logger.info(redirect_uri)
+        debug.info(redirect_uri)
         self.trt.users.append(user)
         response.cookies['state'] = state
         return response
 
     async def auth_return(self, request):
         state = request.rel_url.query['state']
-        logger.info(state)
+        debug.info(state)
         for user in self.trt.users:
-            logger.info(str(user.session_id))
+            debug.info(str(user.session_id))
             if str(user.session_id) == str(state):
                 # Second step of the auth
                 user.auth_code = request.rel_url.query['code']
@@ -101,7 +101,7 @@ class WebServer(web.Application):
                             continue
 
                         try:
-                            if prev_user.spotify_profile.id == user.spotify_profile.id:
+                            if prev_user.spotify_profile["id"] == user.spotify_profile["id"]:
                                 self.trt.users.remove(prev_user)
                         except KeyError:
                             continue
@@ -168,8 +168,8 @@ class WebServer(web.Application):
             # Normally 'play' does this automatically but master does not receive play API calls.
             await self.trt.master.master_user.selected_device()
 
-            logger.info('NEW MASTER USER')
-            logger.info(user.spotify_profile['display_name'])
+            debug.info('NEW MASTER USER')
+            debug.info(user.spotify_profile['display_name'])
             return web.Response(body='OK')
 
         return web.HTTPUnauthorized()
