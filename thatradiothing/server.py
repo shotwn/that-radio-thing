@@ -276,7 +276,10 @@ class WebServer(web.Application):
         if not user:
             return web.HTTPUnauthorized()
 
-        if not user.can_be_master:
+        if not user.spotify_profile:
+            return web.HTTPUnauthorized()
+
+        if not user.spotify_profile["can_be_master"]:
             return web.HTTPUnauthorized()
 
         return web.json_response(self.trt.users)
