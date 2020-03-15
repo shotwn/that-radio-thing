@@ -114,7 +114,10 @@ class WebServer(web.Application):
 
     async def logout(self, request):
         user = await self.logged_in_user(request)
-        if self.trt.master_user == user:
+        if not user:
+            return web.HTTPTemporaryRedirect('/')
+
+        if self.trt.master.master_user == user:
             await self.resign_master_user(request)
 
         self.trt.users.remove(user)
