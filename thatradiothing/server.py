@@ -282,5 +282,8 @@ class WebServer(web.Application):
         if not user.spotify_profile["can_be_master"]:
             return web.HTTPUnauthorized()
 
-        resp_body = await self.trt.users.toJSON()
-        return web.Response(body=resp_body, content_type='application/json')
+        resp_list = []
+        for user in self.trt.users:
+            resp_list.append(await user.summary())
+
+        return web.json_response(resp_list)
