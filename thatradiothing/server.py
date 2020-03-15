@@ -20,6 +20,7 @@ class WebServer(web.Application):
             web.get('/exit', self.exit),
             web.get('/auth', self.auth),
             web.get('/auth_return', self.auth_return),
+            web.get('/logout', self.logout),
             web.get('/successful_auth', self.successful_auth),
             web.get('/devices', self.devices),
             web.post('/devices', self.set_active_device),
@@ -110,6 +111,15 @@ class WebServer(web.Application):
                 return web.Response(text="failed to get auth token")
         else:
             return web.Response(text="no auth")
+
+    async def logout(self, request):
+        user = await self.logged_in_user(request)
+        if self.trt.master_user == user:
+            await self.resign_master_user(request)
+
+        self.trt.users.remove(user)
+
+        return web.HTTPTemporaryRedirect('/')
 
     async def successful_auth(self, request):
         return web.FileResponse('./static/successful-auth.htm')
