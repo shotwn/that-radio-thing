@@ -306,7 +306,7 @@ class User:
 
     async def summary(self):
         return {
-            'session_id': self.session_id,
+            'session_id': str(self.session_id),
             'selected_device': self._selected_device,
             'play_if_paused': self.play_if_paused,
             'enabled': self.enabled,
