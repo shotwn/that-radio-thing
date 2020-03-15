@@ -303,3 +303,14 @@ class User:
                 return False
 
             return True
+
+    async def toJSON(self):
+        return json.dumps({
+            'session_id': self.session_id,
+            'selected_device': self._selected_device,
+            'play_if_paused': self.play_if_paused,
+            'enabled': self.enabled,
+            'paused_cycles': self.paused_cycles,
+            'spotify_profile': self.spotify_profile,
+            'pass_sync_for_cycles': self.pass_sync_for_cycles
+        })
