@@ -2,7 +2,7 @@ import logging
 import logzero
 import pprint
 
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.WARNING)
 
 
 def format(thing):

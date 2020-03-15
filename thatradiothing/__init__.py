@@ -1,6 +1,7 @@
 import asyncio
 import thatradiothing.server
 import thatradiothing.master
+import thatradiothing.autodj
 from thatradiothing.config import CONFIG
 
 
@@ -20,6 +21,7 @@ class ThatRadioThing:
         self.web_server_task = None
         self.master = thatradiothing.master.Master(self)
         self.master_task = None
+        self.autodj = thatradiothing.autodj.AutoDJ(self, 'AUTODJ', 'AUTODJ', self.client_id, self.client_secret, playlists=CONFIG['playlists'])
 
     def run(self):
         loop = asyncio.get_event_loop()
@@ -27,6 +29,7 @@ class ThatRadioThing:
         self.web_server_task.add_done_callback(self.aio_exception_handler)
         self.master_task = loop.create_task(self.master.beat())
         self.master_task.add_done_callback(self.aio_exception_handler)
+
         loop.run_forever()
 
     def aio_exception_handler(self, future):

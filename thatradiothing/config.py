@@ -12,13 +12,17 @@ DEFAULTS = {
         'user-modify-playback-state',
         'user-read-playback-state'
     ],
-    'realtime_tolerance_ms': 1000
+    'realtime_tolerance_ms': 1000,
+    'playlists': [{
+        'uri': 'ENTER YOUR PLAYLIST URI'
+    }]
 }
 
 MANDATORY_CONF_FILE_FIELDS = ['client_id', 'client_secret']
 
 CONFIG = dict()
 CONFIG.update(DEFAULTS)
+
 
 def load_config():
     try:
@@ -34,10 +38,11 @@ def load_config():
         print('Couldn\'t load config file. Parse error.')
         exit()
 
+
 if os.path.isfile('config.json'):
     load_config()
 else:
     if __name__ == '__main__':
-        print ('Config.json doesn\'t exist. Creating a blank one.')
+        print('Config.json doesn\'t exist. Creating a blank one.')
         with open(CONFIG_FILE_NAME, "w") as write_file:
             json.dump(CONFIG, write_file, indent=4, sort_keys=True)

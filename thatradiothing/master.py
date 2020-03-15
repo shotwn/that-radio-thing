@@ -3,6 +3,8 @@ import aiohttp
 from logzero import logger
 # from pprint import pformat
 import time
+import math
+import json
 # import math
 import thatradiothing.exceptions as exceptions
 
@@ -20,18 +22,29 @@ class Master:
         self.now_playing = None
         self.next_track = None
         self.last_listener_count = 0
+        self.last_beat_duration = 0
 
     async def beat(self):
+        # Do async preparations here.
+        await self.trt.autodj.populate()
+
         while True:
             # logger.info('heartbeat')
+            beat_start = time.time()
             try:
                 await self.router()
             except aiohttp.client_exceptions.ClientOSError:
                 pass
 
             await asyncio.sleep(0.4)
+            self.last_beat_duration = time.time() - beat_start
 
     async def router(self):
+        if not self.master_user:
+            if self.trt.autodj:
+                await self.trt.autodj.populate_track()
+                self.master_user = self.trt.autodj
+
         if self.mode == self.modes["MASTER_PLAYER"]:
             await self.sync_to_master_user()
 
@@ -39,6 +52,9 @@ class Master:
         uris = [uri]
         if self.next_playing:
             uris.append(self.next_playing['uri'])
+        logger.debug(f"""SENDING PLAY COMMAND: {json.dumps(uris)}
+POS: {position_ms}""")
+
         await user.play(uris=uris, position_ms=position_ms)  # Start playback
 
     async def sync_to_master_user(self):
@@ -68,7 +84,7 @@ class Master:
             if user.paused_cycles > 10:  # Paused for too long. Disable.
                 user.enabled = False
                 user.paused_cycles = 0
-                logger.debug('Disable user, paused for more than 10 cycles.')
+                logger.debug(f"Disable user: {user.spotify_profile['display_name']}, paused for more than 10 cycles.")
                 continue
 
             # User is a listener.
@@ -94,6 +110,7 @@ class Master:
 
         self.last_listener_count = listeners
         for result in await asyncio.gather(*coroutines, return_exceptions=True):
+            # logger.info(result)
             if result is Exception:
                 logger.error(result)
 
@@ -103,7 +120,8 @@ class Master:
             master_is_playing = master_user_playing['is_playing']
             master_progress = master_user_playing['progress_ms']
             # master_fetched_at = master_user_playing['timestamp']
-        except TypeError:
+        except TypeError as error:
+            logger.error(error)
             return
 
         if not master_is_playing:
@@ -137,6 +155,9 @@ class Master:
             logger.debug('User is not playing, setting flag to try to play.')
             user_playing = None  # This will trigger playback.
 
+        # User was not paused.
+        user.paused_cycles = 0
+
         # From here on we will sync stuff.
         # Calculate required times.
         request_delta = int((time.time() - request_age) * 1000)
@@ -147,9 +168,9 @@ class Master:
         if not user_playing or user_playing['item']['uri'] != master_uri:
             logger.debug(user.spotify_profile['display_name'])
             if not user_playing:
-                logger.debug('User not playing, play.')
+                logger.debug('User not playing anything, play.')
             else:
-                logger.debug('User not playing correct URI, play.')
+                logger.debug(f"User not playing correct URI: {user_playing['item']['name']}, play: {master_user_playing['item']['name']}")
 
             try:
                 await self.start_playback_to_user(user, master_uri, fine_progress_ms)
@@ -181,4 +202,15 @@ class Master:
 
         # User is in sync and everything is OK. (there was no continue trigger.)
         user.message = ''
-        user.pass_sync_for_cycles = 8  # will not do user check for X cycles TODO: Smart duration
+
+        remaining = int((user_playing['item']['duration_ms'] - user_playing['progress_ms']) / 1000)
+        # logger.debug(remaining)
+        # logger.debug(self.last_beat_duration * 8)
+
+        if remaining < math.ceil(self.last_beat_duration * 8):
+            user.pass_sync_for_cycles = int(math.floor(remaining / self.last_beat_duration))
+            logger.debug(
+                f"""Less than {math.ceil(self.last_beat_duration * 8)} cycles before track end.
+                Setting new pass amount: {user.pass_sync_for_cycles}""")
+        else:
+            user.pass_sync_for_cycles = 8  # will not do user check for X cycles
