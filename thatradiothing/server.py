@@ -43,13 +43,13 @@ class WebServer(web.Application):
     async def index(self, request):
         user = await self.logged_in_user(request)
         if user:
-            return await self.player(request)
+            return web.HTTPTemporaryRedirect('/player', headers={'Cache-Control': 'No-Cache'})
         return web.FileResponse('./static/index.htm', headers={'Cache-Control': 'No-Cache'})
 
     async def player(self, request):
         user = await self.logged_in_user(request)
         if not user:
-            return web.HTTPFound('/', headers={'Cache-Control': 'No-Cache'})
+            return web.HTTPTemporaryRedirect('/', headers={'Cache-Control': 'No-Cache'})
         return web.FileResponse('./static/player.htm', headers={'Cache-Control': 'No-Cache'})
 
     async def logo(self, request):
