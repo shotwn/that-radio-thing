@@ -30,7 +30,8 @@ class WebServer(web.Application):
             web.get('/enable', self.enable),
             web.get('/disable', self.disable),
             web.get('/status', self.status),
-            web.get('/api/now_playing', self.now_playing)
+            web.get('/api/now_playing', self.now_playing),
+            web.get('/users', self.users)
         ])
         # web.static('/', './static')
 
@@ -269,3 +270,13 @@ class WebServer(web.Application):
             'now_playing': self.trt.master.now_playing_track
         }
         return web.Response(body=json.dumps(payload))
+
+    async def users(self, request):
+        user = await self.logged_in_user(request)
+        if not user:
+            return web.HTTPUnauthorized()
+
+        if not user.can_be_master:
+            return web.HTTPUnauthorized()
+
+        return web.json_response(self.trt.users)
