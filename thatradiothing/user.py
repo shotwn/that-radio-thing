@@ -217,7 +217,32 @@ class User:
         async with session.get(playlist_url, headers=headers) as response:
             if response.status != 200:
                 return None
-            return await response.json(content_type=None)
+
+            playlist = await response.json(content_type=None)
+
+            if playlist["tracks"]["next"]:
+                more_tracks = await self.get_more_playlist_tracks(playlist["tracks"]["next"], session, headers)
+                playlist["tracks"]["items"].extend(more_tracks)
+
+            """
+            # print(len(playlist["tracks"]["items"]))
+            with open('playlist.json', 'w+') as file:
+                json.dump(playlist, file)
+            """
+
+            return playlist
+
+    async def get_more_playlist_tracks(self, url, session, headers):
+        async with session.get(url, headers=headers) as response:
+            if response.status != 200:
+                return None
+
+            pagination = await response.json(content_type=None)
+            if pagination["next"]:
+                more_tracks = await self.get_more_playlist_tracks(pagination["next"], session, headers)
+                pagination["items"].extend(more_tracks)
+
+            return pagination["items"]
 
     async def pause(self):
         pause_url = self.api + '/v1/me/player/pause'

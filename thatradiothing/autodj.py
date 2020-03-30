@@ -28,9 +28,10 @@ class AutoDJ(thatradiothing.user.User):
         await self.request_tokens()
         self.trt.users.append(self)
 
-        for playlist in self.playlists:
-            playlist['data'] = await self.get_playlist(playlist['uri'])
+        await self.select_playlist(self.playlists[0])
 
+    async def select_playlist(self, playlist):
+        playlist['data'] = await self.get_playlist(playlist['uri'])
         self.selected_playlist = self.playlists[0]
 
     async def request_tokens(self):
@@ -69,20 +70,21 @@ class AutoDJ(thatradiothing.user.User):
         try:
             track = self.now_playing['track']['next_track']
         except (KeyError, TypeError):
+            logger.debug('AUTODJ: First run, getting next track randomly.')
             track = await self.get_random_track()
+
+        next_track = await self.get_random_track()
 
         self.now_playing['track'] = {}
         self.now_playing['track']['item'] = track
-        self.now_playing['track']['next_track'] = await self.get_random_track()
-        self.now_playing['track']['progress_ms'] = has_been_playing_for_ms
+        self.now_playing['track']['next_track'] = next_track
+        self.now_playing['track']['progress_ms'] = has_been_playing_for_ms  # Milliseconds
         self.now_playing['track']['is_playing'] = True
-        self.now_playing['playback_started_at'] = time.time() - has_been_playing_for_ms / 1000
-
-        """
+        self.now_playing['playback_started_at'] = time.time() - has_been_playing_for_ms / 1000  # Seconds
+        logger.debug(f"AUTODJ: Cue in -> {self.now_playing['track']['item']['name']}")
         # FOR DEBUG 4 min inside
-        self.now_playing['playback_started_at'] = time.time() - (has_been_playing_for_ms / 1000 + 4 * 60)
-        self.now_playing['track']['progress_ms'] = has_been_playing_for_ms + 4 * 60
-        """
+        # self.now_playing['playback_started_at'] = time.time() - (has_been_playing_for_ms / 1000 + 4 * 60)
+        # self.now_playing['track']['progress_ms'] = has_been_playing_for_ms + 4 * 60
 
     async def currently_playing(self, raise_exception=False, get_next_from_context=False):
         if not self.now_playing['track']:
@@ -91,8 +93,10 @@ class AutoDJ(thatradiothing.user.User):
             self.now_playing['track']['progress_ms'] = int((time.time() - self.now_playing['playback_started_at']) * 1000)
 
             overshoot = self.now_playing['track']['progress_ms'] - self.now_playing['track']['item']['duration_ms']
+            # logger.debug(f"overshoot: {overshoot} or {int(overshoot/1000)} seconds")
             if overshoot > 0:
                 await self.populate_track(has_been_playing_for_ms=overshoot)
+                # return None  # EXPERIMENT: Simulate the pause on song to song pass ?
 
         # print('---')
         # print(json.dumps(self.now_playing))
