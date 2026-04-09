@@ -23,6 +23,7 @@ class User:
         self.expires_in = None
         self.refresh_token = None
         self.last_refresh = None
+        self.refresh_tokens_after = float('inf')
         self._aiohttp_session = None
         self._selected_device = None
         self.play_if_paused = True  # Disregard user's pause state and start playback.
@@ -151,14 +152,11 @@ class User:
             return True
 
     async def queue(self, uri):
-        queue_url = self.api + '/v1/me/player/queue'
-        payload = {
-            uri: uri
-        }
+        queue_url = self.api + f'/v1/me/player/queue?uri={uri}'
 
         session = await self.aiohttp_session()
         headers = await self.auth_headers()
-        async with session.post(queue_url, payload, headers=headers) as response:
+        async with session.post(queue_url, headers=headers) as response:
             if response.status != 204:
                 return False
             return True

@@ -24,13 +24,15 @@ class ThatRadioThing:
         self.autodj = thatradiothing.autodj.AutoDJ(self, 'AUTODJ', 'AUTODJ', self.client_id, self.client_secret, playlists=CONFIG['playlists'])
 
     def run(self):
-        loop = asyncio.get_event_loop()
-        self.web_server_task = loop.create_task(self.web_server.run())
+        asyncio.run(self._run())
+
+    async def _run(self):
+        self.web_server_task = asyncio.create_task(self.web_server.run())
         self.web_server_task.add_done_callback(self.aio_exception_handler)
-        self.master_task = loop.create_task(self.master.beat())
+        self.master_task = asyncio.create_task(self.master.beat())
         self.master_task.add_done_callback(self.aio_exception_handler)
 
-        loop.run_forever()
+        await asyncio.Event().wait()
 
     def aio_exception_handler(self, future):
         if future.exception():

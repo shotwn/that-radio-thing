@@ -81,7 +81,7 @@ class WebServer(web.Application):
         user = thatradiothing.user.User(self.trt, state, redirect_uri, client_id, self.trt.client_secret)
         debug(redirect_uri)
         self.trt.users.append(user)
-        response.cookies['state'] = state
+        response.cookies['state'] = str(state)
         return response
 
     async def auth_return(self, request):

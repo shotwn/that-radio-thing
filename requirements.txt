@@ -1,2 +1,2 @@
-aiohttp==3.5.4
-logzero==1.5.0
+aiohttp>=3.10,<4
+logzero>=1.7,<2
