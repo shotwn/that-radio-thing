@@ -43,8 +43,30 @@ class User:
         self._devices_cache = None
         self._devices_cache_expires_at = 0.0
 
+        # While a user has just hit "play" but no Spotify device is online
+        # yet, we enter a short "waiting for device" window: the devices
+        # cache TTL collapses to a fast value so a newly-opened client
+        # appears in the list within seconds, and the sync loop suppresses
+        # its usual "no device, disable user" fallback until the window
+        # expires.
+        self.waiting_for_device_until = 0.0
+
     DEVICES_TTL_WITH_DEVICES_SECONDS = 90
     DEVICES_TTL_EMPTY_SECONDS = 15
+    DEVICES_TTL_EMPTY_WHILE_WAITING_SECONDS = 2
+    WAITING_FOR_DEVICE_WINDOW_SECONDS = 30
+
+    def is_waiting_for_device(self):
+        return time.time() < self.waiting_for_device_until
+
+    def begin_waiting_for_device(self):
+        self.waiting_for_device_until = time.time() + self.WAITING_FOR_DEVICE_WINDOW_SECONDS
+        # Invalidate the cache so the next list_devices call hits Spotify.
+        self._devices_cache = None
+        self._devices_cache_expires_at = 0.0
+
+    def end_waiting_for_device(self):
+        self.waiting_for_device_until = 0.0
 
     async def aiohttp_session(self):
         if not self._aiohttp_session:
@@ -122,6 +144,8 @@ class User:
                 logger.error(self)
                 self.enabled = False
                 return None
+        if not self.access_token:
+            return None
         return {'Authorization': 'Bearer ' + self.access_token}
 
     async def play(self, uris=None, position_ms=None):
@@ -178,11 +202,11 @@ class User:
                 return None
 
             data = await response.json(content_type=None)
-            if not data and raise_exception:
+            if (not data or not isinstance(data, dict)) and raise_exception:
                 raise exceptions.NoActiveDevice()
 
             if raise_exception:
-                if not data['is_playing']:
+                if not data.get('is_playing'):
                     raise exceptions.PlaybackPaused()
 
             if get_next_from_context and data and 'context' in data:
@@ -196,7 +220,7 @@ class User:
 
         if context['type'] == 'playlist':
             playlist = await self.get_playlist(context['uri'])
-            if not playlist['tracks'] or not playlist['tracks']['items']:
+            if not playlist or not playlist.get('tracks') or not playlist['tracks'].get('items'):
                 return None
 
             next_track = await self.get_next_track(playlist['tracks']['items'], current_track)
@@ -214,7 +238,10 @@ class User:
 
     async def get_playlist(self, uri):
         playlist_id_r = r'playlist:(.*)'
-        playlist_id = re.search(playlist_id_r, uri).group(1)
+        match = re.search(playlist_id_r, uri)
+        if not match:
+            return None
+        playlist_id = match.group(1)
         playlist_url = self.api + f'/v1/playlists/{playlist_id}'
         headers = await self.auth_headers()
         session = await self.aiohttp_session()
@@ -290,7 +317,12 @@ class User:
                 device["selected_device"] = (str(device['id']) == str(self._selected_device if self._selected_device else ' NONE '))
 
             normalized = {"devices": device_list}
-            ttl = self.DEVICES_TTL_WITH_DEVICES_SECONDS if device_list else self.DEVICES_TTL_EMPTY_SECONDS
+            if device_list:
+                ttl = self.DEVICES_TTL_WITH_DEVICES_SECONDS
+            elif self.is_waiting_for_device():
+                ttl = self.DEVICES_TTL_EMPTY_WHILE_WAITING_SECONDS
+            else:
+                ttl = self.DEVICES_TTL_EMPTY_SECONDS
             self._devices_cache = normalized
             self._devices_cache_expires_at = now + ttl
             return normalized

@@ -152,9 +152,16 @@ POS: {position_ms}""")
         # Get user info
         select_device = await user.selected_device()  # This will also try to select.
         if not select_device:
+            if user.is_waiting_for_device():
+                # Grace window active: keep user enabled, show progress.
+                user.message = "Waiting for a Spotify device to come online…"
+                return
             user.enabled = False
-            user.message = "Please open spotify from one of your devices."
+            user.message = "No Spotify device available. Open Spotify on a device and press play again."
             return
+
+        # A device showed up — leave the waiting state cleanly.
+        user.end_waiting_for_device()
 
         try:
             user_playing = await user.currently_playing(raise_exception=True)
@@ -199,8 +206,11 @@ POS: {position_ms}""")
                 logger.debug('Device not found, trying to select the first device.')
                 selected = await user.select_device(0, first_one=True)
                 if not selected:
+                    if user.is_waiting_for_device():
+                        user.message = "Waiting for a Spotify device to come online…"
+                        return
                     user.enabled = False
-                    user.message = "Please open spotify from one of your devices."
+                    user.message = "No Spotify device available. Open Spotify on a device and press play again."
                 return
 
         # User's deltas are outside tolerances. Do time sync. (seek)

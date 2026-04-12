@@ -523,6 +523,10 @@ class WebServer(web.Application):
 
         user.enabled = True
         user.play_if_paused = True
+        # Fast-refresh the device list and suppress the "no device" auto-disable
+        # for a grace window so a newly-opened Spotify client is picked up.
+        user.begin_waiting_for_device()
+        user.message = "Waiting for a Spotify device to come online…"
 
         return web.HTTPOk()
 
