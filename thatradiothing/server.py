@@ -2,9 +2,12 @@ from aiohttp import web
 
 import uuid
 import json
+import time
+from urllib.parse import urlparse
 from thatradiothing.logger import debug
 # from pprint import pformat
 import thatradiothing.user
+from thatradiothing.jwt_auth import issue_auth_token, verify_auth_token
 
 
 class WebServer(web.Application):
@@ -36,6 +39,149 @@ class WebServer(web.Application):
         # web.static('/', './static')
 
         self.runner = web.AppRunner(self)
+
+    def _cookie_domain(self):
+        domain = self.trt.auth_cookie_domain
+        if isinstance(domain, str) and domain.strip():
+            return domain.strip()
+
+        host = urlparse(self.trt.url).hostname
+        if host == 'duudey.com' or (isinstance(host, str) and host.endswith('.duudey.com')):
+            return '.duudey.com'
+
+        return None
+
+    def _set_auth_cookie(self, response, user):
+        if not user or not user.spotify_profile:
+            return
+
+        spotify_profile = user.spotify_profile
+        spotify_id = spotify_profile.get('id') if isinstance(spotify_profile, dict) else None
+        if not spotify_id:
+            return
+
+        expires_at = None
+        if isinstance(user.refresh_tokens_after, (int, float)) and user.refresh_tokens_after != float('inf'):
+            expires_at = int(user.refresh_tokens_after + 60)
+
+        payload = {
+            'provider': 'spotify',
+            'providerUserId': spotify_id,
+            'displayName': spotify_profile.get('display_name'),
+            'email': spotify_profile.get('email'),
+            'imageUrl': (
+                spotify_profile.get('images', [{}])[0].get('url')
+                if isinstance(spotify_profile.get('images'), list) and spotify_profile.get('images')
+                else None
+            ),
+            'spotifyProfileUrl': (
+                spotify_profile.get('external_urls', {}).get('spotify')
+                if isinstance(spotify_profile.get('external_urls'), dict)
+                else None
+            ),
+            'spotifyAccessToken': user.access_token,
+            'spotifyRefreshToken': user.refresh_token,
+            'spotifyExpiresAt': expires_at,
+            'spotifyScope': user.scope,
+        }
+
+        token = issue_auth_token(
+            secret=self.trt.auth_shared_jwt_secret,
+            issuer=self.trt.auth_jwt_issuer,
+            payload=payload,
+            ttl_seconds=self.trt.auth_cookie_max_age_seconds,
+        )
+
+        cookie_kwargs = {
+            'max_age': self.trt.auth_cookie_max_age_seconds,
+            'httponly': True,
+            'secure': self.trt.auth_cookie_secure,
+            'samesite': 'Lax',
+            'path': '/',
+        }
+        domain = self._cookie_domain()
+        if domain:
+            cookie_kwargs['domain'] = domain
+
+        response.set_cookie(self.trt.auth_cookie_name, token, **cookie_kwargs)
+
+    def _clear_auth_cookie(self, response):
+        domain = self._cookie_domain()
+        if domain:
+            response.del_cookie(self.trt.auth_cookie_name, domain=domain, path='/')
+            return
+        response.del_cookie(self.trt.auth_cookie_name, path='/')
+
+    def _extract_auth_token(self, request):
+        auth_header = request.headers.get('Authorization', '')
+        if isinstance(auth_header, str) and auth_header.lower().startswith('bearer '):
+            token = auth_header.split(' ', 1)[1].strip()
+            if token:
+                return token
+
+        cookie_token = request.cookies.get(self.trt.auth_cookie_name)
+        if isinstance(cookie_token, str) and cookie_token.strip():
+            return cookie_token.strip()
+
+        return None
+
+    async def _find_user_by_spotify_id(self, spotify_id):
+        for user in self.trt.users:
+            if not user.spotify_profile:
+                continue
+            if str(user.spotify_profile.get('id')) == str(spotify_id):
+                return user
+        return None
+
+    def _apply_claims_to_user(self, user, claims):
+        if claims.get('spotifyAccessToken'):
+            user.access_token = claims.get('spotifyAccessToken')
+        if claims.get('spotifyRefreshToken'):
+            user.refresh_token = claims.get('spotifyRefreshToken')
+        if claims.get('spotifyScope'):
+            user.scope = claims.get('spotifyScope')
+
+        expires_at = claims.get('spotifyExpiresAt')
+        if isinstance(expires_at, (int, float)):
+            user.refresh_tokens_after = max(float(expires_at) - 60, time.time() + 10)
+
+        profile = user.spotify_profile or {}
+        spotify_id = claims.get('providerUserId')
+        if spotify_id:
+            profile['id'] = spotify_id
+
+        if claims.get('displayName'):
+            profile['display_name'] = claims.get('displayName')
+        if claims.get('email'):
+            profile['email'] = claims.get('email')
+        if claims.get('spotifyProfileUrl'):
+            profile['external_urls'] = {'spotify': claims.get('spotifyProfileUrl')}
+        profile['can_be_master'] = profile.get('id') in self.trt.masters_list
+        user.spotify_profile = profile
+
+    async def _user_from_jwt_claims(self, claims):
+        spotify_id = claims.get('providerUserId')
+        if not spotify_id:
+            return None
+
+        existing = await self._find_user_by_spotify_id(spotify_id)
+        if existing:
+            self._apply_claims_to_user(existing, claims)
+            return existing
+
+        if not claims.get('spotifyAccessToken'):
+            return None
+
+        user = thatradiothing.user.User(
+            self.trt,
+            uuid.uuid4(),
+            self.trt.url + 'auth_return',
+            self.trt.client_id,
+            self.trt.client_secret,
+        )
+        self._apply_claims_to_user(user, claims)
+        self.trt.users.append(user)
+        return user
 
     async def run(self):
         await self.runner.setup()
@@ -108,7 +254,9 @@ class WebServer(web.Application):
                         except KeyError:
                             continue
 
-                    return web.HTTPFound('/successful_auth')
+                    response = web.HTTPFound('/successful_auth')
+                    self._set_auth_cookie(response, user)
+                    return response
                 return web.Response(text="failed to get auth token")
         else:
             return web.Response(text="no auth")
@@ -123,7 +271,9 @@ class WebServer(web.Application):
 
         self.trt.users.remove(user)
 
-        return web.HTTPTemporaryRedirect('/')
+        response = web.HTTPTemporaryRedirect('/')
+        self._clear_auth_cookie(response)
+        return response
 
     async def successful_auth(self, request):
         return web.FileResponse('./static/successful-auth.htm')
@@ -132,6 +282,18 @@ class WebServer(web.Application):
         exit()
 
     async def logged_in_user(self, request):
+        token = self._extract_auth_token(request)
+        if token:
+            claims = verify_auth_token(
+                token=token,
+                secret=self.trt.auth_shared_jwt_secret,
+                issuer=self.trt.auth_jwt_issuer,
+            )
+            if claims:
+                user_from_claims = await self._user_from_jwt_claims(claims)
+                if user_from_claims and await user_from_claims.auth_headers():
+                    return user_from_claims
+
         user_session_id = request.cookies.get('state', False)
         if not user_session_id:
             return None

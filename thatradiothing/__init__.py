@@ -14,6 +14,12 @@ class ThatRadioThing:
         self.scopes = CONFIG['scopes']
         self.realtime_tolerance_ms = CONFIG['realtime_tolerance_ms']
         self.masters_list = CONFIG['masters_list']
+        self.auth_cookie_name = CONFIG['auth_cookie_name']
+        self.auth_cookie_domain = CONFIG['auth_cookie_domain']
+        self.auth_cookie_secure = bool(CONFIG['auth_cookie_secure'])
+        self.auth_cookie_max_age_seconds = int(CONFIG['auth_cookie_max_age_seconds'])
+        self.auth_jwt_issuer = CONFIG['auth_jwt_issuer']
+        self.auth_shared_jwt_secret = CONFIG['auth_shared_jwt_secret']
 
         self.users = []
 
