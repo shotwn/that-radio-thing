@@ -258,12 +258,17 @@ class User:
             return True
 
     async def list_devices(self):
+        """Return the Spotify devices payload, always shaped ``{"devices": [...]}``.
+
+        Callers rely on indexing ``result["devices"]``; we normalise the
+        non-200 / malformed-response cases to an empty-list envelope instead
+        of a bare ``[]`` so those sites don't explode.
+        """
         now = time.monotonic()
         if self._devices_cache is not None and now < self._devices_cache_expires_at:
             cached = self._devices_cache
-            if isinstance(cached, dict) and "devices" in cached:
-                for device in cached["devices"]:
-                    device["selected_device"] = (str(device['id']) == str(self._selected_device if self._selected_device else ' NONE '))
+            for device in cached.get("devices", []):
+                device["selected_device"] = (str(device['id']) == str(self._selected_device if self._selected_device else ' NONE '))
             return cached
 
         devices_url = self.api + '/v1/me/player/devices'
@@ -274,20 +279,21 @@ class User:
             if response.status != 200:
                 logger.debug("User has no devices")
                 logger.debug(pformat(await response.text()))
-                self._devices_cache = []
+                empty = {"devices": []}
+                self._devices_cache = empty
                 self._devices_cache_expires_at = now + self.DEVICES_TTL_EMPTY_SECONDS
-                return []
+                return empty
 
-            devices = await response.json(content_type=None)
-
-            device_list = devices.get("devices", []) if isinstance(devices, dict) else []
+            body = await response.json(content_type=None)
+            device_list = body.get("devices", []) if isinstance(body, dict) else []
             for device in device_list:
                 device["selected_device"] = (str(device['id']) == str(self._selected_device if self._selected_device else ' NONE '))
 
+            normalized = {"devices": device_list}
             ttl = self.DEVICES_TTL_WITH_DEVICES_SECONDS if device_list else self.DEVICES_TTL_EMPTY_SECONDS
-            self._devices_cache = devices
+            self._devices_cache = normalized
             self._devices_cache_expires_at = now + ttl
-            return devices
+            return normalized
 
     async def select_device(self, dev_id, first_one=False):
         devices = await self.list_devices()
