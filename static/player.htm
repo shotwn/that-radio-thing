@@ -1,5 +1,6 @@
 <script src="https://cdn.jsdelivr.net/npm/vue/dist/vue.js"></script>
 <script src="https://unpkg.com/axios@0.19.2/dist/axios.min.js"></script>
+<script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
 <script
   src="https://cdnjs.cloudflare.com/ajax/libs/color-thief/2.0.1/color-thief.min.js"
   integrity="sha256-fYYt9VmuVbEV36uYrcq2OswibsiRsM+kBL8tJsMpVwk="
@@ -451,8 +452,21 @@
               v-if="status.listeners"
               id="listeners"
               title="Current Listeners"
+              style="position: relative;"
+              @mouseenter="status.users && status.users.length ? (show_users = true) : null"
+              @mouseleave="show_users = false"
             >
               <i class="fas fa-headphones"></i> {{status.listeners}}
+              <div
+                v-if="show_users && status.users && status.users.length"
+                style="position: absolute; top: 100%; right: 0; z-index: 10; background: rgba(0,0,0,0.9); border: 1px solid rgba(255,255,255,0.15); border-radius: 6px; padding: 6px 10px; min-width: 180px; font-size: 12px; line-height: 1.6; white-space: nowrap;"
+              >
+                <div v-for="u in status.users" :key="u.session_id">
+                  <span v-if="u.spotify_profile && u.spotify_profile.display_name">{{u.spotify_profile.display_name}}</span>
+                  <span v-else>(unknown)</span>
+                  <span v-if="!u.enabled" style="opacity:0.6;"> · off</span>
+                </div>
+              </div>
             </div>
           </template>
         </div>
@@ -504,6 +518,7 @@
       return {
         devices: null,
         user_profile: null,
+        show_users: false,
         status: {
           enabled: false,
           progress: 0
@@ -519,17 +534,9 @@
       };
     },
     mounted() {
-      this.getDevices();
-      this.getUserProfile();
       this.getStatus();
     },
     methods: {
-      getDevices() {
-        axios.get("/devices").then(response => {
-          this.devices = response.data.devices;
-          // console.log(response.data);
-        });
-      },
       selectDevice(device_id) {
         data = {
           device_id: device_id
@@ -541,14 +548,9 @@
         };
         axios.post("/devices", data).then(response =>
           setTimeout(() => {
-            this.getDevices();
+            this.getStatus();
           }, 1000)
         );
-      },
-      getUserProfile() {
-        axios.get("/profile").then(response => {
-          this.user_profile = response.data;
-        });
       },
       toggleMaster() {
         if (this.user_profile && this.user_profile.is_master) {
@@ -598,14 +600,26 @@
           }
         });
       },
+      applyStatus(data) {
+        this.status = data;
+        if (data.master_user !== null && data.now_playing !== null) {
+          this.status.progress = data.master_user.progress_ms / data.now_playing.duration_ms * 100
+        }
+        if (data.devices && data.devices.devices) {
+          this.devices = data.devices.devices;
+        } else if (Array.isArray(data.devices)) {
+          this.devices = data.devices;
+        }
+        this.user_profile = {
+          profile: data.profile,
+          can_be_master: data.can_be_master,
+          is_master: data.is_master,
+          message: data.message
+        };
+      },
       getStatus() {
         axios.get("/status").then(response => {
-          this.status = response.data;
-          if (response.data.master_user !== null && response.data.now_playing !== null) {
-            this.status.progress = response.data.master_user.progress_ms / response.data.now_playing.duration_ms * 100
-          }
-          
-          //console.log(response.data)
+          this.applyStatus(response.data);
         });
       },
       checkIfMaster() {
@@ -649,19 +663,20 @@
     }
   });
 
-  setInterval(() => {
-    player.getStatus();
-  }, 4000);
-
-  setInterval(() => {
-    player.getDevices();
-  }, 5000);
-
-  setInterval(() => {
-    player.getUserProfile();
-  }, 5000);
-
   player.getStatus()
-  player.getUserProfile()
-  player.getDevices()
+
+  var pollTimer = null;
+  function startPollFallback() {
+    if (pollTimer) return;
+    pollTimer = setInterval(() => { player.getStatus(); }, 4000);
+  }
+  function stopPollFallback() {
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  }
+
+  var socket = io({ withCredentials: true, transports: ["websocket", "polling"] });
+  socket.on("status", function (data) { player.applyStatus(data); });
+  socket.on("connect", stopPollFallback);
+  socket.on("disconnect", startPollFallback);
+  socket.on("connect_error", startPollFallback);
 </script>

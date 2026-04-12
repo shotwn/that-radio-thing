@@ -40,6 +40,12 @@ class User:
             'cached_params': None  # TODO: Cache currently playing, especially for master user.
         }
 
+        self._devices_cache = None
+        self._devices_cache_expires_at = 0.0
+
+    DEVICES_TTL_WITH_DEVICES_SECONDS = 90
+    DEVICES_TTL_EMPTY_SECONDS = 15
+
     async def aiohttp_session(self):
         if not self._aiohttp_session:
             self._aiohttp_session = aiohttp.ClientSession()
@@ -252,6 +258,14 @@ class User:
             return True
 
     async def list_devices(self):
+        now = time.monotonic()
+        if self._devices_cache is not None and now < self._devices_cache_expires_at:
+            cached = self._devices_cache
+            if isinstance(cached, dict) and "devices" in cached:
+                for device in cached["devices"]:
+                    device["selected_device"] = (str(device['id']) == str(self._selected_device if self._selected_device else ' NONE '))
+            return cached
+
         devices_url = self.api + '/v1/me/player/devices'
         headers = await self.auth_headers()
         session = await self.aiohttp_session()
@@ -260,12 +274,19 @@ class User:
             if response.status != 200:
                 logger.debug("User has no devices")
                 logger.debug(pformat(await response.text()))
+                self._devices_cache = []
+                self._devices_cache_expires_at = now + self.DEVICES_TTL_EMPTY_SECONDS
                 return []
 
             devices = await response.json(content_type=None)
 
-            for device in devices["devices"]:
+            device_list = devices.get("devices", []) if isinstance(devices, dict) else []
+            for device in device_list:
                 device["selected_device"] = (str(device['id']) == str(self._selected_device if self._selected_device else ' NONE '))
+
+            ttl = self.DEVICES_TTL_WITH_DEVICES_SECONDS if device_list else self.DEVICES_TTL_EMPTY_SECONDS
+            self._devices_cache = devices
+            self._devices_cache_expires_at = now + ttl
             return devices
 
     async def select_device(self, dev_id, first_one=False):

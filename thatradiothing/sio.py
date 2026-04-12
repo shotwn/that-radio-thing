@@ -1,0 +1,160 @@
+"""Socket.IO gateway for real-time ``status`` push.
+
+This module owns everything Socket.IO-specific so that :mod:`thatradiothing.server`
+can stay focused on the classical HTTP surface.
+
+Design
+------
+* A single :class:`SocketIOGateway` wraps the :class:`socketio.AsyncServer` and
+  attaches it to the aiohttp application owned by ``WebServer``.
+* Authentication reuses the HTTP auth path. The browser sends the HttpOnly
+  JWT cookie on the WebSocket upgrade (and on long-polling fallback) and we
+  resolve the user via ``WebServer.logged_in_user`` using the aiohttp request
+  exposed by python-socketio in ``environ['aiohttp.request']``. The JWT is
+  never exposed to client JavaScript.
+* A background task (:meth:`SocketIOGateway.push_loop`) ticks once per second.
+  For each connected socket it rebuilds the per-user status payload and emits
+  ``status`` only if the payload differs from what the client last received.
+  This turns N-clients × poll-rate load into N-clients × change-rate load.
+* Stale authentication on long-lived sockets is handled defensively: every
+  tick we call ``user.auth_headers()`` (which refreshes Spotify tokens as
+  needed). If that fails we disconnect the socket so the client reconnects
+  and re-authenticates via the cookie handshake.
+"""
+
+import asyncio
+
+import socketio
+from logzero import logger
+
+
+STATUS_EVENT = 'status'
+PUSH_INTERVAL_SECONDS = 1.0
+
+
+class SocketIOGateway:
+    """Real-time ``status`` gateway backed by python-socketio."""
+
+    def __init__(self, web_server):
+        """Create the Socket.IO server and attach it to the aiohttp app.
+
+        ``web_server`` is the :class:`thatradiothing.server.WebServer`
+        instance; we use it for auth (``logged_in_user``), payload building
+        (``build_status_payload``), and user lookup (``trt.find_user``).
+        """
+        self.web_server = web_server
+        self.trt = web_server.trt
+
+        # Per-sid cache of the last payload we emitted. Used for diffing.
+        self._last_payloads = {}
+        self._push_task = None
+
+        cors_origins = self._resolve_cors_origins()
+        self.sio = socketio.AsyncServer(
+            async_mode='aiohttp',
+            cors_allowed_origins=cors_origins,
+            cors_credentials=bool(self.trt.cors_allow_credentials),
+        )
+        self.sio.attach(web_server)
+        self._register_handlers()
+
+    def _resolve_cors_origins(self):
+        """Mirror the HTTP CORS policy so credentialed handshakes work.
+
+        Browsers reject ``Access-Control-Allow-Origin: *`` combined with
+        credentials, so when the configured list contains an explicit set we
+        pass it through verbatim; otherwise fall back to ``'*'``.
+        """
+        configured = list(self.trt.cors_allowed_origins)
+        if '*' in configured:
+            return '*'
+        return configured
+
+    async def start(self):
+        """Start the background push loop. Call once after the site is up."""
+        if self._push_task is None:
+            self._push_task = asyncio.create_task(self.push_loop())
+
+    # --- handlers ---------------------------------------------------------
+
+    def _register_handlers(self):
+        sio = self.sio
+
+        @sio.event
+        async def connect(sid, environ, auth):
+            """Authenticate the socket via the HTTP cookie on the handshake."""
+            request = environ.get('aiohttp.request')
+            if request is None:
+                return False
+
+            try:
+                user = await self.web_server.logged_in_user(request)
+            except Exception:
+                logger.exception("socket.io connect auth failed")
+                return False
+            if not user:
+                return False
+
+            # Store only the user's session_id; we re-resolve the User
+            # object each tick so a logged-out/removed user is caught.
+            async with sio.session(sid) as session:
+                session['session_id'] = str(user.session_id)
+
+            # Send an initial snapshot so the client doesn't wait a tick.
+            try:
+                payload = await self.web_server.build_status_payload(user)
+                self._last_payloads[sid] = payload
+                await sio.emit(STATUS_EVENT, payload, to=sid)
+            except Exception:
+                logger.exception("initial status emit failed")
+
+        @sio.event
+        async def disconnect(sid):
+            self._last_payloads.pop(sid, None)
+
+    # --- push loop --------------------------------------------------------
+
+    async def push_loop(self):
+        """Forever: diff and emit per-socket status at a fixed cadence."""
+        while True:
+            try:
+                await self._tick()
+            except Exception:
+                logger.exception("status push loop error")
+            await asyncio.sleep(PUSH_INTERVAL_SECONDS)
+
+    async def _tick(self):
+        # Snapshot sids so mutation during iteration is safe.
+        for sid in list(self._last_payloads.keys()):
+            await self._emit_for_sid(sid)
+
+    async def _emit_for_sid(self, sid):
+        try:
+            async with self.sio.session(sid) as session:
+                session_id = session.get('session_id')
+        except KeyError:
+            # Socket already gone; drop the last-payload slot.
+            self._last_payloads.pop(sid, None)
+            return
+
+        if not session_id:
+            return
+
+        user = await self.trt.find_user(session_id=session_id)
+        if not user:
+            await self._drop(sid)
+            return
+
+        # Token freshness check; refreshes if needed, disconnects if dead.
+        if not await user.auth_headers():
+            await self._drop(sid)
+            return
+
+        payload = await self.web_server.build_status_payload(user)
+        if payload != self._last_payloads.get(sid):
+            self._last_payloads[sid] = payload
+            await self.sio.emit(STATUS_EVENT, payload, to=sid)
+
+    async def _drop(self, sid):
+        await self.sio.disconnect(sid)
+        self._last_payloads.pop(sid, None)

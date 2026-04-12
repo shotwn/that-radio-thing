@@ -1,36 +1,55 @@
+"""HTTP server for thatradiothing.
+
+This module hosts the classical aiohttp request handlers: OAuth flow, master
+election, device/profile/status endpoints, etc.
+
+Real-time ``status`` push is intentionally kept out of here — see
+:mod:`thatradiothing.sio` for the Socket.IO gateway. The gateway reuses this
+class's :meth:`WebServer.logged_in_user` and :meth:`WebServer.build_status_payload`
+so the wire format and auth rules stay consistent across both transports.
+"""
+
 from aiohttp import web
 
 import uuid
 import json
 import time
 from urllib.parse import urlparse
+
 from thatradiothing.logger import debug
-# from pprint import pformat
 import thatradiothing.user
 from thatradiothing.jwt_auth import issue_auth_token, verify_auth_token
+from thatradiothing.sio import SocketIOGateway
 
 
 class WebServer(web.Application):
+    """aiohttp application hosting HTTP routes and the Socket.IO gateway.
+
+    The class is intentionally split into clearly-labelled sections so that
+    the HTTP surface can be read independently of the cross-cutting helpers
+    (CORS, cookies, JWT) and from the Socket.IO wiring, which lives in
+    :class:`thatradiothing.sio.SocketIOGateway` and is merely instantiated
+    here.
+    """
+
     def __init__(self, thatradiothing, **kwargs):
         super().__init__(**kwargs)
 
         self.trt = thatradiothing
 
-        @web.middleware
-        async def cors_middleware(request, handler):
-            if request.method == 'OPTIONS':
-                response = web.Response(status=204)
-                return self._apply_cors_headers(request, response)
+        self.middlewares.append(self._build_cors_middleware())
+        self._register_routes()
 
-            try:
-                response = await handler(request)
-            except web.HTTPException as ex:
-                response = ex
+        self.runner = web.AppRunner(self)
 
-            return self._apply_cors_headers(request, response)
+        # Socket.IO: real-time status push. All wiring lives in the gateway.
+        self.sio_gateway = SocketIOGateway(self)
 
-        self.middlewares.append(cors_middleware)
+    # ------------------------------------------------------------------
+    # Route registration
+    # ------------------------------------------------------------------
 
+    def _register_routes(self):
         self.router.add_route('*', '/', self.index)
         self.add_routes([
             web.get('/player', self.player),
@@ -49,11 +68,28 @@ class WebServer(web.Application):
             web.get('/disable', self.disable),
             web.get('/status', self.status),
             web.get('/api/now_playing', self.now_playing),
-            web.get('/users', self.users)
+            web.get('/users', self.users),
         ])
-        # web.static('/', './static')
 
-        self.runner = web.AppRunner(self)
+    def _build_cors_middleware(self):
+        @web.middleware
+        async def cors_middleware(request, handler):
+            if request.method == 'OPTIONS':
+                response = web.Response(status=204)
+                return self._apply_cors_headers(request, response)
+
+            try:
+                response = await handler(request)
+            except web.HTTPException as ex:
+                response = ex
+
+            return self._apply_cors_headers(request, response)
+
+        return cors_middleware
+
+    # ------------------------------------------------------------------
+    # CORS helpers
+    # ------------------------------------------------------------------
 
     @staticmethod
     def _normalize_origin(origin):
@@ -106,6 +142,16 @@ class WebServer(web.Application):
             response.headers['Access-Control-Allow-Credentials'] = 'true'
 
         return response
+
+    # ------------------------------------------------------------------
+    # Auth cookie + JWT helpers
+    #
+    # Auth is JWT-based. The JWT is stored in an HttpOnly cookie so client
+    # JavaScript cannot read it; the browser attaches it automatically on
+    # both HTTP requests and Socket.IO handshakes. Cross-origin requests
+    # from duudey.com require a ``.duudey.com`` cookie domain and the
+    # credentialed CORS headers applied above.
+    # ------------------------------------------------------------------
 
     def _cookie_domain(self):
         domain = self.trt.auth_cookie_domain
@@ -250,10 +296,20 @@ class WebServer(web.Application):
         self.trt.users.append(user)
         return user
 
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
     async def run(self):
+        """Bind the TCP site and start the Socket.IO push loop."""
         await self.runner.setup()
         self.site = web.TCPSite(self.runner, '0.0.0.0', self.trt.port)
-        return await self.site.start()
+        await self.site.start()
+        await self.sio_gateway.start()
+
+    # ------------------------------------------------------------------
+    # HTTP handlers
+    # ------------------------------------------------------------------
 
     async def index(self, request):
         user = await self.logged_in_user(request)
@@ -349,6 +405,22 @@ class WebServer(web.Application):
         exit()
 
     async def logged_in_user(self, request):
+        """Resolve the currently-authenticated user for an aiohttp request.
+
+        Two mechanisms, tried in order:
+
+        1. **JWT**: ``Authorization: Bearer …`` header or the HttpOnly auth
+           cookie. On success, claims are reconciled into an existing
+           ``User`` (matched by Spotify id) or used to hydrate a new one.
+        2. **Legacy ``state`` cookie** from the OAuth handshake, which maps
+           directly to an in-memory ``User.session_id``.
+
+        Returns the ``User`` or a falsy value when unauthenticated or when
+        Spotify token refresh fails.
+
+        Also used by the Socket.IO gateway via the aiohttp request exposed
+        on the handshake ``environ``.
+        """
         token = self._extract_auth_token(request)
         if token:
             claims = verify_auth_token(
@@ -402,7 +474,7 @@ class WebServer(web.Application):
 
     async def set_master_user(self, request):
         user = await self.logged_in_user(request)
-        if not user:
+        if not user or not user.spotify_profile:
             return web.HTTPUnauthorized()
 
         if user.spotify_profile['can_be_master']:
@@ -419,7 +491,7 @@ class WebServer(web.Application):
 
     async def resign_master_user(self, request):
         user = await self.logged_in_user(request)
-        if not user:
+        if not user or not user.spotify_profile:
             return web.HTTPUnauthorized()
 
         if user.spotify_profile['can_be_master'] and user == self.trt.master.master_user:
@@ -430,10 +502,9 @@ class WebServer(web.Application):
 
     async def profile(self, request):
         user = await self.logged_in_user(request)
-        if not user:
+        if not user or not user.spotify_profile:
             return web.HTTPUnauthorized()
 
-        is_user_master = False
         is_user_master = self.trt.master.master_user == user
 
         user_profile = {
@@ -466,11 +537,23 @@ class WebServer(web.Application):
 
         return web.HTTPOk()
 
-    async def status(self, request):
-        user = await self.logged_in_user(request)
-        if not user:
-            return web.HTTPUnauthorized()
+    # ------------------------------------------------------------------
+    # Status payload (shared with Socket.IO gateway)
+    # ------------------------------------------------------------------
 
+    async def build_status_payload(self, user):
+        """Compute the ``status`` payload for ``user``.
+
+        Shared between the HTTP ``/status`` handler and the Socket.IO push
+        loop so both transports stay byte-for-byte compatible; the gateway
+        diffs consecutive payloads with ``==`` to decide whether to emit.
+
+        Includes the per-user fields (``profile``, ``enabled``, ``devices``,
+        ``is_master``, ``message``) that previously lived on ``/profile``
+        and ``/devices``, letting clients drop their polling of those.
+        When ``user.can_be_master`` is true the payload also embeds a
+        ``users`` summary list (consumed by the listener-count hover UI).
+        """
         master_user = {
             'display_name': None,
             'progress_ms': None,
@@ -478,20 +561,39 @@ class WebServer(web.Application):
         }
 
         if self.trt.master.master_user:
-            master_user['display_name'] = self.trt.master.master_user.spotify_profile["display_name"]
+            master_profile = self.trt.master.master_user.spotify_profile or {}
+            master_user['display_name'] = master_profile.get('display_name')
             if self.trt.master.now_playing:
                 master_user['progress_ms'] = self.trt.master.now_playing["progress_ms"]
-            # TODO: Make it optional
-            if self.trt.master.master_user.spotify_profile:
-                master_user['external_url'] = self.trt.master.master_user.spotify_profile["external_urls"]["spotify"]
+            external_urls = master_profile.get('external_urls') or {}
+            master_user['external_url'] = external_urls.get('spotify')
+
+        is_user_master = self.trt.master.master_user == user
+        can_be_master = bool(user.spotify_profile and user.spotify_profile.get('can_be_master'))
 
         payload = {
             'now_playing': self.trt.master.now_playing_track,
             'master_user': master_user,
             'listeners': self.trt.master.last_listener_count,
-            'enabled': user.enabled
+            'enabled': user.enabled,
+            'profile': user.spotify_profile,
+            'can_be_master': can_be_master,
+            'is_master': is_user_master,
+            'message': user.message,
+            'devices': await user.list_devices(),
         }
 
+        if can_be_master:
+            payload['users'] = [await u.summary() for u in self.trt.users]
+
+        return payload
+
+    async def status(self, request):
+        user = await self.logged_in_user(request)
+        if not user:
+            return web.HTTPUnauthorized()
+
+        payload = await self.build_status_payload(user)
         return web.Response(body=json.dumps(payload))
 
     async def now_playing(self, request):

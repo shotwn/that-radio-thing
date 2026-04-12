@@ -58,60 +58,76 @@ POS: {position_ms}""")
         await user.play(uris=uris, position_ms=position_ms)  # Start playback
 
     async def sync_to_master_user(self):
+        """One sync cycle across all users.
+
+        Spotify calls are minimized by fetching ``master.currently_playing``
+        *once* per cycle and sharing it across every listener that needs a
+        sync this tick. Latency compensation is unaffected: we stamp the
+        fetch with ``request_age`` (monotonic wall time) and each listener's
+        ``sync_to_master_user_single`` re-computes ``request_delta =
+        now - request_age`` at its own send time, so the progress offset
+        stays accurate regardless of how long the shared fetch took or how
+        many listeners run in parallel.
+        """
         if not self.master_user:
             return
 
-        coroutines = []
+        # First pass: classify users; no Spotify calls yet.
+        active_listeners = []
         listeners = 0
-        for user in self.trt.users:  # Iterate all users.
-            # Pass states
-            if not user.access_token:  # Not logged in pass.
+        for user in self.trt.users:
+            if not user.access_token:  # Not logged in.
                 continue
 
-            if user == self.master_user:  # Master user. Get now playing then pass.
-                # This part is only for meta. Master user now playing is fetched in every sync check seperately.
-                if self.last_listener_count == 0:  # When there is only master.
-                    master_user_playing = await self.master_user.currently_playing(get_next_from_context=True)
-                    if master_user_playing:
-                        self.now_playing_track = master_user_playing['item']
-                        self.now_playing = master_user_playing
-                        self.next_playing = master_user_playing['next_track']
+            if user == self.master_user:
+                continue  # Meta refresh for master is handled below.
+
+            if not user.enabled:
                 continue
 
-            if not user.enabled:  # User is disabled pass.
-                continue
-
-            if user.paused_cycles > 10:  # Paused for too long. Disable.
+            if user.paused_cycles > 10:  # Paused too long; disable.
                 user.enabled = False
                 user.paused_cycles = 0
                 logger.debug(f"Disable user: {user.spotify_profile['display_name']}, paused for more than 10 cycles.")
                 continue
 
-            # User is a listener.
             listeners += 1
 
-            # But maybe sync is not gonna happen this cycle.
-            if user.pass_sync_for_cycles > 0:  # Pauses user sync for X amount of cycles.
-                user.pass_sync_for_cycles += -1
+            if user.pass_sync_for_cycles > 0:  # Skip sync for this listener this tick.
+                user.pass_sync_for_cycles -= 1
                 continue
 
-            # Get master info
-            master_user_playing = await self.master_user.currently_playing(get_next_from_context=True)
-            request_age = time.time()  # How much time passed since master info is fetched
-
-            if not master_user_playing:
-                continue
-
-            self.now_playing_track = master_user_playing['item']
-            self.now_playing = master_user_playing
-            self.next_playing = master_user_playing['next_track']
-
-            coroutines.append(self.sync_to_master_user_single(master_user_playing, request_age, user))
+            active_listeners.append(user)
 
         self.last_listener_count = listeners
+
+        # If nobody needs a sync this tick, only refresh master meta when
+        # the master is alone (so the UI's now_playing stays current).
+        if not active_listeners:
+            if listeners == 0:
+                master_user_playing = await self.master_user.currently_playing(get_next_from_context=True)
+                if master_user_playing:
+                    self.now_playing_track = master_user_playing['item']
+                    self.now_playing = master_user_playing
+                    self.next_playing = master_user_playing['next_track']
+            return
+
+        # Single master fetch for this tick, shared across all active listeners.
+        master_user_playing = await self.master_user.currently_playing(get_next_from_context=True)
+        request_age = time.time()
+        if not master_user_playing:
+            return
+
+        self.now_playing_track = master_user_playing['item']
+        self.now_playing = master_user_playing
+        self.next_playing = master_user_playing['next_track']
+
+        coroutines = [
+            self.sync_to_master_user_single(master_user_playing, request_age, user)
+            for user in active_listeners
+        ]
         for result in await asyncio.gather(*coroutines, return_exceptions=True):
-            # logger.info(result)
-            if result is Exception:
+            if isinstance(result, Exception):
                 logger.error(result)
 
     async def sync_to_master_user_single(self, master_user_playing, request_age, user):
