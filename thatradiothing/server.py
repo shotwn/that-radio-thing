@@ -531,6 +531,7 @@ class WebServer(web.Application):
         # for a grace window so a newly-opened Spotify client is picked up.
         user.begin_waiting_for_device()
         user.message = "Waiting for a Spotify device to come online…"
+        user.message_expires_at = 0.0  # Persist while the waiting window is active.
 
         return web.HTTPOk()
 
@@ -546,6 +547,7 @@ class WebServer(web.Application):
         # explicitly disabled.
         user.end_waiting_for_device()
         user.message = ''
+        user.message_expires_at = 0.0
         await user.pause()  # Pause user.
         user.play_if_paused = True  # Next time enabled, it will play regardless of pause.
 
@@ -568,6 +570,10 @@ class WebServer(web.Application):
         When ``user.can_be_master`` is true the payload also embeds a
         ``users`` summary list (consumed by the listener-count hover UI).
         """
+        # Drop any transient message whose TTL has passed before building
+        # the payload, so clients stop seeing it on the next push/diff.
+        user.expire_message_if_due()
+
         master_user = {
             'display_name': None,
             'progress_ms': None,

@@ -57,6 +57,12 @@ class User:
         # don't return a day later and see yesterday's warning.
         self.last_interaction_at = time.time()
 
+        # Optional expiry for ``message``. Short-lived explanatory text
+        # (e.g. the "no device available" terminal state) sets this so it
+        # disappears from the UI shortly after the user has had a chance
+        # to see it. 0 means "no expiry".
+        self.message_expires_at = 0.0
+
     DEVICES_TTL_WITH_DEVICES_SECONDS = 90
     DEVICES_TTL_EMPTY_SECONDS = 15
     DEVICES_TTL_EMPTY_WHILE_WAITING_SECONDS = 2
@@ -65,6 +71,20 @@ class User:
 
     def touch_interaction(self):
         self.last_interaction_at = time.time()
+
+    def set_transient_message(self, text, ttl_seconds=10):
+        """Set ``message`` so it auto-expires after ``ttl_seconds``.
+
+        Use for short-lived explanatory text the UI should drop once the
+        user has had time to read it (e.g. terminal error states).
+        """
+        self.message = text
+        self.message_expires_at = time.time() + ttl_seconds
+
+    def expire_message_if_due(self):
+        if self.message_expires_at and time.time() >= self.message_expires_at:
+            self.message = ''
+            self.message_expires_at = 0.0
 
     def is_idle_disabled(self):
         return (

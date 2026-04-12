@@ -175,7 +175,9 @@ POS: {position_ms}""")
                 user.message = "Waiting for a Spotify device to come online…"
                 return
             user.enabled = False
-            user.message = "No Spotify device available. Open Spotify on a device and press play again."
+            user.set_transient_message(
+                "No Spotify device available. Open Spotify on a device and press play again."
+            )
             return
 
         # A device showed up — leave the waiting state cleanly.
