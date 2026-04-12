@@ -51,10 +51,27 @@ class User:
         # expires.
         self.waiting_for_device_until = 0.0
 
+        # Last time the user took an action (enable/disable/master/device
+        # select). Used by the idle sweep to clear stale ``message`` text
+        # for users who disabled playback and then wandered off — so they
+        # don't return a day later and see yesterday's warning.
+        self.last_interaction_at = time.time()
+
     DEVICES_TTL_WITH_DEVICES_SECONDS = 90
     DEVICES_TTL_EMPTY_SECONDS = 15
     DEVICES_TTL_EMPTY_WHILE_WAITING_SECONDS = 2
     WAITING_FOR_DEVICE_WINDOW_SECONDS = 30
+    IDLE_MESSAGE_RESET_SECONDS = 30 * 60
+
+    def touch_interaction(self):
+        self.last_interaction_at = time.time()
+
+    def is_idle_disabled(self):
+        return (
+            not self.enabled
+            and not self.is_waiting_for_device()
+            and (time.time() - self.last_interaction_at) > self.IDLE_MESSAGE_RESET_SECONDS
+        )
 
     def is_waiting_for_device(self):
         return time.time() < self.waiting_for_device_until

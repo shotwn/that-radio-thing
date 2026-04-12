@@ -1,5 +1,5 @@
 import asyncio
-import aiohttp
+from aiohttp import ClientOSError
 from logzero import logger
 # from pprint import pformat
 import time
@@ -24,20 +24,38 @@ class Master:
         self.last_listener_count = 0
         self.last_beat_duration = 0
 
+    IDLE_SWEEP_INTERVAL_SECONDS = 60
+
     async def beat(self):
         # Do async preparations here.
         await self.trt.autodj.populate()
 
+        last_idle_sweep = 0.0
         while True:
             # logger.info('heartbeat')
             beat_start = time.time()
             try:
                 await self.router()
-            except aiohttp.client_exceptions.ClientOSError:
+            except ClientOSError:
                 pass
+
+            if beat_start - last_idle_sweep > self.IDLE_SWEEP_INTERVAL_SECONDS:
+                self._idle_sweep()
+                last_idle_sweep = beat_start
 
             await asyncio.sleep(0.4)
             self.last_beat_duration = time.time() - beat_start
+
+    def _idle_sweep(self):
+        """Clear stale UI state on users who've been disabled and idle.
+
+        Prevents a user who disabled playback and closed the tab from
+        seeing a stale "waiting for device…" or terminal error message on
+        their next visit.
+        """
+        for user in self.trt.users:
+            if user.is_idle_disabled() and user.message:
+                user.message = ''
 
     async def router(self):
         if not self.master_user:

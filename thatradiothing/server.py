@@ -470,6 +470,7 @@ class WebServer(web.Application):
         if not device:
             return web.HTTPNotFound()
 
+        user.touch_interaction()
         return web.Response(body=json.dumps({'status': True}))
 
     async def set_master_user(self, request):
@@ -485,6 +486,7 @@ class WebServer(web.Application):
 
             debug('NEW MASTER USER')
             debug(user.spotify_profile['display_name'])
+            user.touch_interaction()
             return web.Response(body='OK')
 
         return web.HTTPUnauthorized()
@@ -496,6 +498,7 @@ class WebServer(web.Application):
 
         if user.spotify_profile['can_be_master'] and user == self.trt.master.master_user:
             self.trt.master.master_user = None  # TODO: maybe bot here ?
+            user.touch_interaction()
             return web.Response(body='OK')
 
         return web.HTTPUnauthorized()
@@ -523,6 +526,7 @@ class WebServer(web.Application):
 
         user.enabled = True
         user.play_if_paused = True
+        user.touch_interaction()
         # Fast-refresh the device list and suppress the "no device" auto-disable
         # for a grace window so a newly-opened Spotify client is picked up.
         user.begin_waiting_for_device()
@@ -536,6 +540,12 @@ class WebServer(web.Application):
             return web.HTTPUnauthorized()
 
         user.enabled = False
+        user.touch_interaction()
+        # Cancel any pending "waiting for device" grace window so we don't
+        # auto-resume playback if a device comes online after the user
+        # explicitly disabled.
+        user.end_waiting_for_device()
+        user.message = ''
         await user.pause()  # Pause user.
         user.play_if_paused = True  # Next time enabled, it will play regardless of pause.
 
