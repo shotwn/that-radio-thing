@@ -128,7 +128,11 @@ POS: {position_ms}""")
         ]
         for result in await asyncio.gather(*coroutines, return_exceptions=True):
             if isinstance(result, Exception):
-                logger.error(result)
+                logger.error(
+                    "sync_to_master_user_single failed: %s",
+                    result,
+                    exc_info=result,
+                )
 
     async def sync_to_master_user_single(self, master_user_playing, request_age, user):
         try:
