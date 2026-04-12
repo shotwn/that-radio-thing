@@ -1,5 +1,5 @@
-import os.path
 import os
+import os.path
 import json
 
 CONFIG_FILE_NAME = 'config.json'
@@ -17,9 +17,12 @@ DEFAULTS = {
     'auth_cookie_name': 'duudey_auth',
     'auth_cookie_domain': None,
     'auth_cookie_secure': True,
+    'auth_cookie_samesite': 'Lax',
     'auth_cookie_max_age_seconds': 2592000,
     'auth_jwt_issuer': 'duudey-auth',
     'auth_shared_jwt_secret': 'CHANGE_ME_TO_A_RANDOM_STRING_myMmcQJLoIzhKJoYkDXDTiMZT8RKG1JD',
+    'cors_allowed_origins': [],
+    'cors_allow_credentials': True,
     'playlists': [{
         'uri': 'ENTER YOUR PLAYLIST URI'
     }]
@@ -61,12 +64,53 @@ def load_config():
             if env_cookie_secure is not None:
                 CONFIG['auth_cookie_secure'] = env_cookie_secure.strip().lower() in ('1', 'true', 'yes', 'on')
 
+            cookie_samesite = str(CONFIG.get('auth_cookie_samesite', 'Lax')).strip().lower()
+            if cookie_samesite == 'none':
+                CONFIG['auth_cookie_samesite'] = 'None'
+            elif cookie_samesite == 'strict':
+                CONFIG['auth_cookie_samesite'] = 'Strict'
+            else:
+                CONFIG['auth_cookie_samesite'] = 'Lax'
+
+            env_cookie_samesite = os.getenv('AUTH_COOKIE_SAMESITE')
+            if env_cookie_samesite is not None:
+                env_cookie_samesite = env_cookie_samesite.strip().lower()
+                if env_cookie_samesite == 'none':
+                    CONFIG['auth_cookie_samesite'] = 'None'
+                elif env_cookie_samesite == 'strict':
+                    CONFIG['auth_cookie_samesite'] = 'Strict'
+                else:
+                    CONFIG['auth_cookie_samesite'] = 'Lax'
+
             env_cookie_max_age = os.getenv('AUTH_TOKEN_TTL_SECONDS')
             if env_cookie_max_age:
                 try:
                     CONFIG['auth_cookie_max_age_seconds'] = max(60, int(env_cookie_max_age))
                 except ValueError:
                     pass
+
+            cors_allowed_origins = CONFIG.get('cors_allowed_origins', [])
+            if isinstance(cors_allowed_origins, str):
+                cors_allowed_origins = [cors_allowed_origins]
+            if not isinstance(cors_allowed_origins, list):
+                cors_allowed_origins = []
+            CONFIG['cors_allowed_origins'] = [
+                str(origin).strip().rstrip('/')
+                for origin in cors_allowed_origins
+                if str(origin).strip()
+            ]
+
+            env_cors_allowed_origins = os.getenv('CORS_ALLOWED_ORIGINS')
+            if env_cors_allowed_origins is not None:
+                CONFIG['cors_allowed_origins'] = [
+                    origin.strip().rstrip('/')
+                    for origin in env_cors_allowed_origins.split(',')
+                    if origin.strip()
+                ]
+
+            env_cors_allow_credentials = os.getenv('CORS_ALLOW_CREDENTIALS')
+            if env_cors_allow_credentials is not None:
+                CONFIG['cors_allow_credentials'] = env_cors_allow_credentials.strip().lower() in ('1', 'true', 'yes', 'on')
 
             print(CONFIG)
     except json.JSONDecodeError:

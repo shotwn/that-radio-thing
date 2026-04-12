@@ -17,9 +17,12 @@ class ThatRadioThing:
         self.auth_cookie_name = CONFIG['auth_cookie_name']
         self.auth_cookie_domain = CONFIG['auth_cookie_domain']
         self.auth_cookie_secure = bool(CONFIG['auth_cookie_secure'])
+        self.auth_cookie_samesite = CONFIG['auth_cookie_samesite']
         self.auth_cookie_max_age_seconds = int(CONFIG['auth_cookie_max_age_seconds'])
         self.auth_jwt_issuer = CONFIG['auth_jwt_issuer']
         self.auth_shared_jwt_secret = CONFIG['auth_shared_jwt_secret']
+        self.cors_allowed_origins = list(CONFIG.get('cors_allowed_origins', []))
+        self.cors_allow_credentials = bool(CONFIG.get('cors_allow_credentials', True))
 
         self.users = []
 

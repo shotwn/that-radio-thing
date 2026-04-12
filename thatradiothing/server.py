@@ -16,6 +16,21 @@ class WebServer(web.Application):
 
         self.trt = thatradiothing
 
+        @web.middleware
+        async def cors_middleware(request, handler):
+            if request.method == 'OPTIONS':
+                response = web.Response(status=204)
+                return self._apply_cors_headers(request, response)
+
+            try:
+                response = await handler(request)
+            except web.HTTPException as ex:
+                response = ex
+
+            return self._apply_cors_headers(request, response)
+
+        self.middlewares.append(cors_middleware)
+
         self.router.add_route('*', '/', self.index)
         self.add_routes([
             web.get('/player', self.player),
@@ -39,6 +54,58 @@ class WebServer(web.Application):
         # web.static('/', './static')
 
         self.runner = web.AppRunner(self)
+
+    @staticmethod
+    def _normalize_origin(origin):
+        if not isinstance(origin, str):
+            return None
+
+        trimmed = origin.strip()
+        if not trimmed:
+            return None
+
+        return trimmed.rstrip('/')
+
+    def _allowed_origin(self, request):
+        request_origin = self._normalize_origin(request.headers.get('Origin'))
+        if not request_origin:
+            return None
+
+        allowed_origins = [
+            self._normalize_origin(origin)
+            for origin in self.trt.cors_allowed_origins
+        ]
+        allowed_origins = [origin for origin in allowed_origins if origin]
+
+        if '*' in allowed_origins:
+            return request_origin
+
+        if request_origin in allowed_origins:
+            return request_origin
+
+        return None
+
+    def _apply_cors_headers(self, request, response):
+        allowed_origin = self._allowed_origin(request)
+        if not allowed_origin:
+            return response
+
+        response.headers['Access-Control-Allow-Origin'] = allowed_origin
+        response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+        response.headers['Access-Control-Allow-Headers'] = 'Authorization, Content-Type'
+        response.headers['Access-Control-Max-Age'] = '600'
+
+        vary = response.headers.get('Vary')
+        if vary:
+            if 'Origin' not in vary:
+                response.headers['Vary'] = f'{vary}, Origin'
+        else:
+            response.headers['Vary'] = 'Origin'
+
+        if self.trt.cors_allow_credentials:
+            response.headers['Access-Control-Allow-Credentials'] = 'true'
+
+        return response
 
     def _cookie_domain(self):
         domain = self.trt.auth_cookie_domain
@@ -96,7 +163,7 @@ class WebServer(web.Application):
             'max_age': self.trt.auth_cookie_max_age_seconds,
             'httponly': True,
             'secure': self.trt.auth_cookie_secure,
-            'samesite': 'Lax',
+            'samesite': self.trt.auth_cookie_samesite,
             'path': '/',
         }
         domain = self._cookie_domain()

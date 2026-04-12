@@ -1,0 +1,32 @@
+{
+  "url": "https://thatradiothing.duudey.com/",
+  "port": 33408,
+  "client_id": "ENTER_YOUR_SPOTIFY_CLIENT_ID",
+  "client_secret": "ENTER_YOUR_SPOTIFY_CLIENT_SECRET",
+  "masters_list": [
+    "ENTER_AT_LEAST_ONE_SPOTIFY_USER_ID"
+  ],
+  "scopes": [
+    "user-modify-playback-state",
+    "user-read-playback-state"
+  ],
+  "realtime_tolerance_ms": 1000,
+  "auth_cookie_name": "duudey_auth",
+  "auth_cookie_domain": ".duudey.com",
+  "auth_cookie_secure": true,
+  "auth_cookie_samesite": "Lax",
+  "auth_cookie_max_age_seconds": 2592000,
+  "auth_jwt_issuer": "duudey-auth",
+  "auth_shared_jwt_secret": "CHANGE_ME_TO_A_RANDOM_STRING",
+  "cors_allowed_origins": [
+    "https://duudey.com",
+    "https://www.duudey.com",
+    "https://YOUR-TUNNEL.euw.devtunnels.ms"
+  ],
+  "cors_allow_credentials": true,
+  "playlists": [
+    {
+      "uri": "ENTER_YOUR_PLAYLIST_URI"
+    }
+  ]
+}
