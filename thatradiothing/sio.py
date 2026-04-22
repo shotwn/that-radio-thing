@@ -23,13 +23,26 @@ Design
 """
 
 import asyncio
+import time
 
 import socketio
 from logzero import logger
 
 
 STATUS_EVENT = 'status'
+
+# How often the push loop wakes to look at per-socket state. Kept at 1 s
+# so real state changes (track flip, master change, device list, enable
+# toggle) are visible to clients within a second.
 PUSH_INTERVAL_SECONDS = 1.0
+
+# Heartbeat cadence when nothing else has changed. Without this we used
+# to emit every tick because ``master_user.progress_ms`` ticks by ~1000
+# each second — a strictly identical payload shape that still tripped
+# the diff. Clients only use progress_ms for a UI progress bar, so a
+# 5 s correction is plenty; the actual playback-sync loop lives in
+# master.py and does not depend on this event.
+HEARTBEAT_INTERVAL_SECONDS = 5.0
 
 
 class SocketIOGateway:
@@ -47,6 +60,9 @@ class SocketIOGateway:
 
         # Per-sid cache of the last payload we emitted. Used for diffing.
         self._last_payloads = {}
+        # Per-sid monotonic timestamp of the last emit, so we can ratchet
+        # the progress-bar heartbeat independently of the diff.
+        self._last_emit_monotonic = {}
         self._push_task = None
 
         cors_origins = self._resolve_cors_origins()
@@ -104,6 +120,7 @@ class SocketIOGateway:
             try:
                 payload = await self.web_server.build_status_payload(user)
                 self._last_payloads[sid] = payload
+                self._last_emit_monotonic[sid] = time.monotonic()
                 await sio.emit(STATUS_EVENT, payload, to=sid)
             except Exception:
                 logger.exception("initial status emit failed")
@@ -111,6 +128,7 @@ class SocketIOGateway:
         @sio.event
         async def disconnect(sid):
             self._last_payloads.pop(sid, None)
+            self._last_emit_monotonic.pop(sid, None)
 
     # --- push loop --------------------------------------------------------
 
@@ -151,10 +169,38 @@ class SocketIOGateway:
             return
 
         payload = await self.web_server.build_status_payload(user)
-        if payload != self._last_payloads.get(sid):
+        last_payload = self._last_payloads.get(sid)
+        content_changed = last_payload is None or self._diff_key(payload) != self._diff_key(last_payload)
+
+        now = time.monotonic()
+        last_emit = self._last_emit_monotonic.get(sid, 0.0)
+        heartbeat_due = (now - last_emit) >= HEARTBEAT_INTERVAL_SECONDS
+
+        if content_changed or heartbeat_due:
             self._last_payloads[sid] = payload
+            self._last_emit_monotonic[sid] = now
             await self.sio.emit(STATUS_EVENT, payload, to=sid)
+
+    def _diff_key(self, payload):
+        """Return a payload view that ignores the per-second progress tick.
+
+        ``master_user.progress_ms`` increments by ~1000 every push tick
+        while a master is playing. Left in, it tripped the naive
+        ``payload != last`` check every single second even when nothing
+        else about the state had changed. Strip it for the change-detect
+        comparison; the real value still goes out on the wire whenever
+        we do decide to emit (immediate on real change, or once per
+        heartbeat interval for UI drift correction).
+        """
+        if not isinstance(payload, dict):
+            return payload
+        master = payload.get('master_user')
+        if isinstance(master, dict) and 'progress_ms' in master:
+            masked_master = {**master, 'progress_ms': None}
+            return {**payload, 'master_user': masked_master}
+        return payload
 
     async def _drop(self, sid):
         await self.sio.disconnect(sid)
         self._last_payloads.pop(sid, None)
+        self._last_emit_monotonic.pop(sid, None)
