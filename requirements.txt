@@ -1,4 +1,5 @@
 aiohttp>=3.10,<4
 logzero>=1.7,<2
 PyJWT>=2.10,<3
+python-dotenv>=1.0,<2
 python-socketio>=5.11,<6

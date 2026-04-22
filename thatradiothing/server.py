@@ -38,6 +38,7 @@ class WebServer(web.Application):
         self.trt = thatradiothing
 
         self.middlewares.append(self._build_cors_middleware())
+        self.middlewares.append(self._build_auth_cookie_rotation_middleware())
         self._register_routes()
 
         self.runner = web.AppRunner(self)
@@ -86,6 +87,54 @@ class WebServer(web.Application):
             return self._apply_cors_headers(request, response)
 
         return cors_middleware
+
+    def _build_auth_cookie_rotation_middleware(self):
+        """Rotate the auth cookie when in-memory Spotify tokens drift from the
+        ones we loaded from the JWT.
+
+        Handlers read tokens via ``user.auth_headers()``, which proactively
+        refreshes near-expiry tokens in memory. Without this middleware the
+        refreshed tokens never make it back into the client's cookie, so the
+        next request rebuilds the user from a stale JWT — the silent-expiry
+        bug we're fixing.
+
+        Skipped when the handler has already written a Set-Cookie for the
+        auth cookie (logout, /auth_return) so we never overwrite explicit
+        intent — logout stays destructive, login stays authoritative.
+        """
+
+        @web.middleware
+        async def auth_cookie_rotation_middleware(request, handler):
+            try:
+                response = await handler(request)
+            except web.HTTPException as ex:
+                response = ex
+
+            try:
+                user = request.get('user')
+                if not user:
+                    return response
+
+                # Don't fight handlers that set the cookie explicitly.
+                cookies = getattr(response, 'cookies', None)
+                if cookies is not None and self.trt.auth_cookie_name in cookies:
+                    return response
+
+                loaded_expires_at = request.get('auth_expires_at_on_load')
+                current_expires_at = None
+                if isinstance(user.refresh_tokens_after, (int, float)) and user.refresh_tokens_after != float('inf'):
+                    current_expires_at = int(user.refresh_tokens_after + 60)
+
+                if current_expires_at is None or loaded_expires_at == current_expires_at:
+                    return response
+
+                self._set_auth_cookie(response, user)
+            except Exception:  # noqa: BLE001 - never let cookie rotation mask a handler response
+                pass
+
+            return response
+
+        return auth_cookie_rotation_middleware
 
     # ------------------------------------------------------------------
     # CORS helpers
@@ -429,8 +478,16 @@ class WebServer(web.Application):
                 issuer=self.trt.auth_jwt_issuer,
             )
             if claims:
+                # Record the expiry we started with so the cookie-rotation
+                # middleware can detect when auth_headers() has silently
+                # refreshed tokens and push the fresh ones back to the client.
+                loaded_expiry = claims.get('spotifyExpiresAt')
+                if isinstance(loaded_expiry, (int, float)):
+                    request['auth_expires_at_on_load'] = int(loaded_expiry)
+
                 user_from_claims = await self._user_from_jwt_claims(claims)
                 if user_from_claims and await user_from_claims.auth_headers():
+                    request['user'] = user_from_claims
                     return user_from_claims
 
         user_session_id = request.cookies.get('state', False)
@@ -444,6 +501,7 @@ class WebServer(web.Application):
         if not await user.auth_headers():
             return False
 
+        request['user'] = user
         return user
 
     async def devices(self, request):

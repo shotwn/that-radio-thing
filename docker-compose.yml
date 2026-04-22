@@ -1,0 +1,13 @@
+services:
+  thatradiothing:
+    build: .
+    container_name: thatradiothing
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "${TRT_PORT:-33408}:${TRT_PORT:-33408}"
+    volumes:
+      # Persist rotating log files on the host so they survive rebuilds
+      # and can be tailed directly (./logs/thatradiothing.log).
+      - ./logs:/app/logs

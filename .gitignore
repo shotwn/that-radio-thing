@@ -1,5 +1,9 @@
+.env
 config.json
 __pycache__
 env
 logo.png
+logs/
+*.log
+*.log.*
 .claude/settings.local.json

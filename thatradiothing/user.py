@@ -185,6 +185,20 @@ class User:
             return None
         return {'Authorization': 'Bearer ' + self.access_token}
 
+    async def force_refresh_on_unauthorized(self):
+        """Force a token refresh in response to a 401 from Spotify.
+
+        Defence-in-depth against the silent-expiry bug: the proactive check
+        in ``auth_headers`` handles the common time-based expiry case, but
+        clock skew or a revoked-then-reissued token can still surface as a
+        401. One forced refresh + retry keeps the sync loop from breaking.
+        Returns True if a fresh access token is now in place.
+        """
+        refreshed = await self.refresh_tokens()
+        if not refreshed:
+            return False
+        return bool(self.access_token)
+
     async def play(self, uris=None, position_ms=None):
         play_url = self.api + '/v1/me/player/play'
         selected_device = await self.selected_device()
@@ -197,59 +211,88 @@ class User:
             'uris': uris,
             'position_ms': position_ms if position_ms else 0
         }
-        headers = await self.auth_headers()
         session = await self.aiohttp_session()
-        async with session.put(play_url, json=payload, headers=headers) as response:
-            if response.status == 404:
-                raise exceptions.NoActiveDevice()
-            if response.status == 403:
-                raise exceptions.PremiumRequired()
-
-            if response.status != 204:
-                raise exceptions.OtherError(await response.text())
-            return True
+        for attempt in range(2):
+            headers = await self.auth_headers()
+            if headers is None:
+                return False
+            async with session.put(play_url, json=payload, headers=headers) as response:
+                if response.status == 401 and attempt == 0:
+                    if not await self.force_refresh_on_unauthorized():
+                        raise exceptions.OtherError(await response.text())
+                    continue
+                if response.status == 404:
+                    raise exceptions.NoActiveDevice()
+                if response.status == 403:
+                    raise exceptions.PremiumRequired()
+                if response.status != 204:
+                    raise exceptions.OtherError(await response.text())
+                return True
 
     async def seek(self, position_ms):
         seek_url = self.api + '/v1/me/player/seek'
-        headers = await self.auth_headers()
         session = await self.aiohttp_session()
-        async with session.put(seek_url + f'?position_ms={position_ms}', headers=headers) as response:
-            if response.status != 204:
+        for attempt in range(2):
+            headers = await self.auth_headers()
+            if headers is None:
                 return False
-            return True
+            async with session.put(seek_url + f'?position_ms={position_ms}', headers=headers) as response:
+                if response.status == 401 and attempt == 0:
+                    if not await self.force_refresh_on_unauthorized():
+                        return False
+                    continue
+                if response.status != 204:
+                    return False
+                return True
 
     async def queue(self, uri):
         queue_url = self.api + f'/v1/me/player/queue?uri={uri}'
 
         session = await self.aiohttp_session()
-        headers = await self.auth_headers()
-        async with session.post(queue_url, headers=headers) as response:
-            if response.status != 204:
+        for attempt in range(2):
+            headers = await self.auth_headers()
+            if headers is None:
                 return False
-            return True
+            async with session.post(queue_url, headers=headers) as response:
+                if response.status == 401 and attempt == 0:
+                    if not await self.force_refresh_on_unauthorized():
+                        return False
+                    continue
+                if response.status != 204:
+                    return False
+                return True
 
     async def currently_playing(self, raise_exception=False, get_next_from_context=False):
         currently_playing_url = self.api + '/v1/me/player/currently-playing'
         session = await self.aiohttp_session()
-        headers = await self.auth_headers()
-        async with session.get(currently_playing_url, headers=headers) as response:
-            if response.status == 204:
-                if raise_exception:
-                    raise exceptions.NoContent('Nothing is playing')
+        response = None
+        for attempt in range(2):
+            headers = await self.auth_headers()
+            if headers is None:
                 return None
+            async with session.get(currently_playing_url, headers=headers) as resp:
+                if resp.status == 401 and attempt == 0:
+                    if not await self.force_refresh_on_unauthorized():
+                        return None
+                    continue
+                response = resp
+                if response.status == 204:
+                    if raise_exception:
+                        raise exceptions.NoContent('Nothing is playing')
+                    return None
 
-            data = await response.json(content_type=None)
-            if (not data or not isinstance(data, dict)) and raise_exception:
-                raise exceptions.NoActiveDevice()
+                data = await response.json(content_type=None)
+                if (not data or not isinstance(data, dict)) and raise_exception:
+                    raise exceptions.NoActiveDevice()
 
-            if raise_exception:
-                if not data.get('is_playing'):
-                    raise exceptions.PlaybackPaused()
+                if raise_exception:
+                    if not data.get('is_playing'):
+                        raise exceptions.PlaybackPaused()
 
-            if get_next_from_context and data and 'context' in data:
-                next_track = await self.next_from_context(data['context'], data['item'])
-                data['next_track'] = next_track
-            return data
+                if get_next_from_context and data and 'context' in data:
+                    next_track = await self.next_from_context(data['context'], data['item'])
+                    data['next_track'] = next_track
+                return data
 
     async def next_from_context(self, context, current_track):
         if not context or 'type' not in context:
@@ -314,12 +357,19 @@ class User:
 
     async def pause(self):
         pause_url = self.api + '/v1/me/player/pause'
-        headers = await self.auth_headers()
         session = await self.aiohttp_session()
-        async with session.put(pause_url, headers=headers) as response:
-            if response.status != 204:
+        for attempt in range(2):
+            headers = await self.auth_headers()
+            if headers is None:
                 return False
-            return True
+            async with session.put(pause_url, headers=headers) as response:
+                if response.status == 401 and attempt == 0:
+                    if not await self.force_refresh_on_unauthorized():
+                        return False
+                    continue
+                if response.status != 204:
+                    return False
+                return True
 
     async def list_devices(self):
         """Return the Spotify devices payload, always shaped ``{"devices": [...]}``.
