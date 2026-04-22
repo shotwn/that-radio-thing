@@ -412,18 +412,19 @@ class WebServer(web.Application):
                 user.auth_code = request.rel_url.query['code']
                 result = await user.request_tokens()  # also loads user profile
                 if result:
-                    # await user.play('4uLU6hMCjMI75M1A2tKUQC')
-                    # self.trt.master.master_user = user
-                    # return web.Response(text="great success")
-                    # TODO: Logout other users with same spotify profile info
-                    for prev_user in self.trt.users:
-                        if prev_user == user:
+                    # Drop any previous session objects for this Spotify
+                    # account — a user can log in again from a different
+                    # browser / tab, and we want the newest session to own
+                    # the User record. Iterate a snapshot (list(...)) so the
+                    # remove() calls don't skip entries in the live list.
+                    for prev_user in list(self.trt.users):
+                        if prev_user is user:
                             continue
 
                         try:
                             if prev_user.spotify_profile["id"] == user.spotify_profile["id"]:
                                 self.trt.users.remove(prev_user)
-                        except KeyError:
+                        except (KeyError, ValueError):
                             continue
 
                     response = web.HTTPFound('/successful_auth')

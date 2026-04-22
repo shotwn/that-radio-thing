@@ -1,11 +1,11 @@
 import asyncio
+import json
+import math
+import time
+
 from aiohttp import ClientOSError
 from logzero import logger
-# from pprint import pformat
-import time
-import math
-import json
-# import math
+
 import thatradiothing.exceptions as exceptions
 
 
