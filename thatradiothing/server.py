@@ -267,12 +267,27 @@ class WebServer(web.Application):
 
         response.set_cookie(self.trt.auth_cookie_name, token, **cookie_kwargs)
 
+        # Companion presence flag, JS-readable, no auth material. The
+        # duudey.com site reads this via ``document.cookie`` to decide
+        # whether to skip its ``/api/auth/me`` probe on first paint;
+        # see ``src/lib/auth/jwt.ts::LOGGED_IN_COOKIE_NAME`` on the site
+        # side for the full contract. We mirror every other attribute
+        # of the JWT cookie so the two cookies route identically and
+        # expire together — the only divergence is ``httponly=False``.
+        flag_kwargs = dict(cookie_kwargs)
+        flag_kwargs['httponly'] = False
+        response.set_cookie(self.trt.logged_in_cookie_name, '1', **flag_kwargs)
+
     def _clear_auth_cookie(self, response):
+        # Clear both cookies in lockstep so the site shell never sees
+        # the flag without the JWT (or vice versa).
         domain = self._cookie_domain()
         if domain:
             response.del_cookie(self.trt.auth_cookie_name, domain=domain, path='/')
+            response.del_cookie(self.trt.logged_in_cookie_name, domain=domain, path='/')
             return
         response.del_cookie(self.trt.auth_cookie_name, path='/')
+        response.del_cookie(self.trt.logged_in_cookie_name, path='/')
 
     def _extract_auth_token(self, request):
         auth_header = request.headers.get('Authorization', '')

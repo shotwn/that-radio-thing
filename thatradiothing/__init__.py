@@ -15,6 +15,7 @@ class ThatRadioThing:
         self.realtime_tolerance_ms = CONFIG['realtime_tolerance_ms']
         self.masters_list = CONFIG['masters_list']
         self.auth_cookie_name = CONFIG['auth_cookie_name']
+        self.logged_in_cookie_name = CONFIG['logged_in_cookie_name']
         self.auth_cookie_domain = CONFIG['auth_cookie_domain']
         self.auth_cookie_secure = bool(CONFIG['auth_cookie_secure'])
         self.auth_cookie_samesite = CONFIG['auth_cookie_samesite']

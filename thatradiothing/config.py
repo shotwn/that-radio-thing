@@ -75,6 +75,14 @@ CONFIG = {
     'realtime_tolerance_ms': _parse_int(os.getenv('TRT_REALTIME_TOLERANCE_MS'), 1000, minimum=0),
     'playlists': _parse_json(os.getenv('TRT_PLAYLISTS'), []),
     'auth_cookie_name': os.getenv('AUTH_COOKIE_NAME', 'duudey_auth'),
+    # Companion cookie that's NOT HttpOnly. We mint it in lockstep with
+    # the real ``duudey_auth`` JWT so the duudey.com site shell can
+    # detect "this user has a session somewhere on .duudey.com" via
+    # ``document.cookie`` and skip the ``/api/auth/me`` probe for
+    # guests on first paint. Carries no auth material — just presence
+    # signalling. The site verifies the JWT for anything that
+    # actually matters.
+    'logged_in_cookie_name': os.getenv('LOGGED_IN_COOKIE_NAME', 'duudey_logged_in'),
     'auth_cookie_domain': (os.getenv('AUTH_COOKIE_DOMAIN') or '').strip() or None,
     'auth_cookie_secure': _parse_bool(os.getenv('AUTH_COOKIE_SECURE'), True),
     'auth_cookie_samesite': _parse_samesite(os.getenv('AUTH_COOKIE_SAMESITE')),
