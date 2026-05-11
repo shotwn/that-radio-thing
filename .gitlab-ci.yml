@@ -1,0 +1,63 @@
+stages:
+  - verify
+  - publish
+
+# Run on merge requests, normal branch pushes, and tags so the sister
+# service can publish deployable images independently from duudey.com.
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH
+    - if: $CI_COMMIT_TAG
+
+variables:
+  DOCKER_BUILDKIT: "1"
+  DOCKER_DRIVER: overlay2
+  DOCKER_HOST: tcp://docker:2375
+  DOCKER_TLS_CERTDIR: ""
+  GIT_DEPTH: "20"
+
+default:
+  interruptible: true
+
+python_checks:
+  stage: verify
+  image: python:3.12-slim
+  script:
+    # Keep the verification job quick and deterministic. A full image
+    # rebuild still happens in the publish stage, so packaging issues
+    # are caught before anything reaches the registry.
+    - python -m compileall main.py thatradiothing
+
+publish_image:
+  stage: publish
+  image: docker:27-cli
+  services:
+    - name: docker:27-dind
+      command: ["--tls=false"]
+  needs:
+    - python_checks
+  script:
+    # Publish a commit-addressable image on every branch so duudey.com's
+    # deploy pipeline can point at an exact thatradiothing build.
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+    - export TRT_IMAGE="$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA"
+    - docker build --pull -t "$TRT_IMAGE" .
+    - docker push "$TRT_IMAGE"
+    - |
+      if [ "$CI_COMMIT_BRANCH" = "$CI_DEFAULT_BRANCH" ]; then
+        docker tag "$TRT_IMAGE" "$CI_REGISTRY_IMAGE:latest"
+        docker push "$CI_REGISTRY_IMAGE:latest"
+      fi
+    - |
+      if [ -n "$CI_COMMIT_TAG" ]; then
+        docker tag "$TRT_IMAGE" "$CI_REGISTRY_IMAGE:$CI_COMMIT_TAG"
+        docker push "$CI_REGISTRY_IMAGE:$CI_COMMIT_TAG"
+      fi
+    - printf "THATRADIOTHING_IMAGE=%s\n" "$TRT_IMAGE" > publish.env
+  artifacts:
+    reports:
+      dotenv: publish.env
+  rules:
+    - if: $CI_COMMIT_BRANCH
+    - if: $CI_COMMIT_TAG
