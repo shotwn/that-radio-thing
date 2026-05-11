@@ -67,6 +67,12 @@ class WebServer(web.Application):
             web.get('/profile', self.profile),
             web.get('/enable', self.enable),
             web.get('/disable', self.disable),
+            # DEPRECATED: prefer the Socket.IO ``status`` event (see
+            # ``sio.py``). The push channel emits the same payload on
+            # state change and on connect, so polling this REST endpoint
+            # is no longer necessary. Kept around only as a fallback for
+            # transports that cannot speak Socket.IO. Will be removed
+            # once no client polls it.
             web.get('/status', self.status),
             web.get('/api/now_playing', self.now_playing),
             web.get('/users', self.users),
@@ -683,12 +689,51 @@ class WebServer(web.Application):
         return payload
 
     async def status(self, request):
+        """
+        Return the current radio state for the logged-in user.
+
+        DEPRECATED — clients should subscribe to the Socket.IO ``status``
+        event instead of polling this endpoint. The websocket channel
+        emits the same payload whenever state changes and replays the
+        current state on connect, so polling here is wasted traffic.
+
+        This handler is kept available for two narrow cases:
+
+        * Server-side or scripted callers that cannot open a Socket.IO
+          connection.
+        * One-shot reads during boot, before the client has wired up
+          its socket subscription.
+
+        We advertise the deprecation to clients via two response
+        headers, following RFC 8594 (the ``Deprecation`` header) and
+        the related ``Sunset`` / ``Link`` conventions:
+
+        * ``Deprecation: true`` — flags every response as deprecated so
+          ops dashboards and the browser DevTools console can surface
+          it without parsing the body.
+        * ``Link: </socket.io/>; rel="successor-version"`` — points
+          callers at the replacement transport. The ``rel`` value is
+          the IANA-registered successor relation used in deprecation
+          announcements.
+
+        We deliberately do *not* set a ``Sunset`` date yet because we
+        haven't picked a removal window; once we do, add it here.
+        """
         user = await self.logged_in_user(request)
         if not user:
-            return web.HTTPUnauthorized()
+            return web.HTTPUnauthorized(headers={
+                'Deprecation': 'true',
+                'Link': '</socket.io/>; rel="successor-version"',
+            })
 
         payload = await self.build_status_payload(user)
-        return web.Response(body=json.dumps(payload))
+        return web.Response(
+            body=json.dumps(payload),
+            headers={
+                'Deprecation': 'true',
+                'Link': '</socket.io/>; rel="successor-version"',
+            },
+        )
 
     async def now_playing(self, request):
         payload = {
