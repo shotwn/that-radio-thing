@@ -24,6 +24,7 @@ Design
 
 import asyncio
 import time
+from typing import Any
 
 import socketio
 from logzero import logger
@@ -78,13 +79,11 @@ class SocketIOGateway:
         """Mirror the HTTP CORS policy so credentialed handshakes work.
 
         Browsers reject ``Access-Control-Allow-Origin: *`` combined with
-        credentials, so when the configured list contains an explicit set we
-        pass it through verbatim; otherwise fall back to ``'*'``.
+        credentials, and this handshake is always credentialed. ``config``
+        guarantees an explicit list -- ``_parse_origins`` rejects ``'*'`` at
+        startup -- so the configured origins pass through verbatim.
         """
-        configured = list(self.trt.cors_allowed_origins)
-        if "*" in configured:
-            return "*"
-        return configured
+        return list(self.trt.cors_allowed_origins)
 
     async def start(self):
         """Start the background push loop. Call once after the site is up."""
@@ -119,7 +118,7 @@ class SocketIOGateway:
                 session["session_id"] = str(user.session_id)
                 session["is_admin"] = bool(
                     user.spotify_profile
-                    and str(user.spotify_profile.get("id")) in set(self.trt.admin_ids)
+                    and str(user.spotify_profile.get("id")) in self.trt.admin_ids
                 )
 
             # Send an initial snapshot so the client doesn't wait a tick.
@@ -158,11 +157,23 @@ class SocketIOGateway:
     async def _tick(self):
         """Emit one status update to every currently tracked socket."""
 
+        # The admin payload carries no per-user data, so build it at most once
+        # per tick and share it across admin sockets. Building it per socket
+        # cost two SQLite round trips per admin socket per second. ``tick_cache``
+        # is scoped to this tick, so the data stays as fresh as it was before.
+        tick_cache: dict[str, Any] = {}
         # Snapshot sids so mutation during iteration is safe.
         for sid in list(self._last_payloads.keys()):
-            await self._emit_for_sid(sid)
+            await self._emit_for_sid(sid, tick_cache)
 
-    async def _emit_for_sid(self, sid):
+    async def _shared_admin_payload(self, tick_cache):
+        """Build the admin status payload once per tick, then reuse it."""
+
+        if "admin" not in tick_cache:
+            tick_cache["admin"] = await self.web_server.admin_api.status_payload()
+        return tick_cache["admin"]
+
+    async def _emit_for_sid(self, sid, tick_cache=None):
         """Authenticate and conditionally emit the latest state to one socket."""
 
         try:
@@ -187,11 +198,10 @@ class SocketIOGateway:
             await self._drop(sid)
             return
 
-        payload = (
-            await self.web_server.admin_api.status_payload()
-            if is_admin
-            else await self.web_server.build_status_payload(user)
-        )
+        if is_admin:
+            payload = await self._shared_admin_payload(tick_cache if tick_cache is not None else {})
+        else:
+            payload = await self.web_server.build_status_payload(user)
         last_payload = self._last_payloads.get(sid)
         content_changed = last_payload is None or self._diff_key(payload) != self._diff_key(
             last_payload

@@ -168,21 +168,13 @@ class WebServer(web.Application):
         return trimmed.rstrip("/")
 
     def _allowed_origin(self, request):
+        # config._parse_origins canonicalizes and validates the configured list
+        # at startup, so it needs no normalization here -- only the untrusted
+        # request header does. A bare "*" cannot appear: _parse_origins rejects
+        # any entry without an http(s) scheme and hostname.
         request_origin = self._normalize_origin(request.headers.get("Origin"))
-        if not request_origin:
-            return None
-
-        allowed_origins = [
-            self._normalize_origin(origin) for origin in self.trt.cors_allowed_origins
-        ]
-        allowed_origins = [origin for origin in allowed_origins if origin]
-
-        if "*" in allowed_origins:
+        if request_origin and request_origin in self.trt.cors_allowed_origins:
             return request_origin
-
-        if request_origin in allowed_origins:
-            return request_origin
-
         return None
 
     def _apply_cors_headers(self, request, response):

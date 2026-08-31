@@ -17,7 +17,20 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dateutil.rrule import rruleset, rrulestr
 
+# Longest permitted show, and -- by construction -- the lookback window used
+# when scanning for occurrences. These two roles are coupled: because no
+# occurrence may run longer than this, every interval still active at time T
+# must have started within ``T - MAX_DURATION_SECONDS``, which is what makes
+# that lookback both sufficient and necessary. Raising the cap without widening
+# the lookback would silently drop long shows from ``latest_occurrence`` and
+# ``occurrences_between`` -- no error, just a missing program.
 MAX_DURATION_SECONDS = 7 * 24 * 60 * 60
+
+# Hard ceiling on recurrence candidates examined for one series, and on an
+# accepted ``COUNT``. A malicious or fat-fingered rule (``FREQ=DAILY`` with no
+# ``UNTIL``, queried across a decade) must fail loudly rather than pin the event
+# loop. The bare ``10_000`` in the ``INTERVAL`` check below is a separate,
+# unrelated bound -- do not collapse the two.
 MAX_OCCURRENCE_SCAN = 10_000
 ALLOWED_RRULE_FREQUENCIES = {"DAILY", "WEEKLY", "MONTHLY", "YEARLY"}
 
@@ -480,7 +493,40 @@ def resolve_active(
     series: Iterable[dict[str, Any]],
     now: datetime | None = None,
 ) -> tuple[Occurrence | None, datetime | None, list[Occurrence]]:
-    """Resolve the winner, next boundary, and all active overlap candidates."""
+    """Resolve the winner, next boundary, and all active overlap candidates.
+
+    This is the station's on-air decision: whatever this returns as *winner* is
+    what listeners hear.
+
+    Args:
+        series: Schedule series rows. Rows with ``enabled`` false are skipped,
+            and a row that fails to expand is skipped individually so one
+            corrupt program cannot take the whole station off the air.
+        now: Instant to resolve at; defaults to the current UTC time. Naive
+            values are read as UTC by :func:`parse_utc`.
+
+    Returns:
+        ``(winner, next_transition, candidates)``.
+
+        *winner* is the single occurrence that should be on air, or ``None``
+        when nothing is scheduled -- the caller then falls back to the default
+        playlist. Overlaps are broken by ``(priority, start_utc, series_id)``,
+        largest first: higher priority wins; on a tie the *later* start wins, so
+        a special layered over a long block takes over rather than being buried
+        by it; ``series_id`` is a final tiebreak that exists purely to make the
+        result deterministic rather than dependent on input order.
+
+        *next_transition* is the earliest end-of-active or next-start strictly
+        after ``now``, or ``None`` when no further change is known. It is a hint
+        for scheduling a wakeup, not a promise that state will change then.
+
+        *candidates* holds every occurrence active at ``now``, including the
+        winner. Losers are returned as *copies* with ``suppressed`` set and
+        ``suppression_reason`` naming the winning series, so the admin calendar
+        can explain a conflict instead of hiding it. The originals are not
+        mutated.
+
+    """
 
     now_utc = parse_utc(now or datetime.now(UTC))
     candidates: list[Occurrence] = []

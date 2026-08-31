@@ -35,7 +35,6 @@ class Master:
     async def beat(self):
         """Run the playback synchronization heartbeat until cancelled."""
 
-        # Do async preparations here.
         # The application bootstrap populates AutoDJ before this task is
         # started. Keep this guard for tests/embedded callers that start the
         # Master directly, but avoid reloading Spotify credentials every time
@@ -45,7 +44,6 @@ class Master:
 
         last_idle_sweep = 0.0
         while True:
-            # logger.info('heartbeat')
             beat_start = time.monotonic()
             with suppress(ClientOSError):
                 await self.router()
@@ -177,7 +175,6 @@ POS: {position_ms}""")
             master_uri = master_user_playing["item"]["uri"]
             master_is_playing = master_user_playing["is_playing"]
             master_progress = master_user_playing["progress_ms"]
-            # master_fetched_at = master_user_playing['timestamp']
         except TypeError as error:
             logger.error(error)
             return
@@ -189,7 +186,6 @@ POS: {position_ms}""")
             )
             return
 
-        # Get user info
         select_device = await user.selected_device()  # This will also try to select.
         if not select_device:
             if user.is_waiting_for_device():
@@ -213,26 +209,22 @@ POS: {position_ms}""")
             if isinstance(exc, exceptions.PlaybackPaused):  # Paused
                 if user.play_if_paused:  # Hit this after re-enable, prevent pass due pause.
                     user.play_if_paused = False
-                elif (
-                    master_is_playing and master_progress > 4000
-                ):  # TODO: Sketchy, User paused it, play if paused was not triggered. TODO:this is sketchy
+                # 4000 ms is an empirical threshold inherited from the original
+                # sync loop: below it a "paused" reading is treated as noise (a
+                # seek or track flip Spotify has not settled yet) rather than a
+                # deliberate pause. Above it paused_cycles accumulates and
+                # sync_to_master_user disables the listener after 10 beats.
+                # Nobody has measured how long that transient actually lasts --
+                # both numbers are unvalidated guesses, not tuned values.
+                elif master_is_playing and master_progress > 4000:
                     user.paused_cycles += 1
                     return  # Pass.
-            """
-            request_delta = int((time.time() - request_age)*1000)
-            await self.start_playback_to_user(user, master_uri, master_progress + request_delta)
-            return # We are done here.
-            """
             logger.debug("User is not playing, setting flag to try to play.")
             user_playing = None  # This will trigger playback.
 
-        # User was not paused.
         user.paused_cycles = 0
 
-        # From here on we will sync stuff.
-        # Calculate required times.
         request_delta = int((time.monotonic() - request_age) * 1000)
-        # timestamp_delta = math.floor((user_playing['timestamp'] - master_fetched_at)/100)
         fine_progress_ms = master_progress + request_delta
 
         # User is not playing at all or not playing same thing as master. Start playback. (play)
@@ -271,7 +263,6 @@ POS: {position_ms}""")
                 f"> user:   {user_playing['progress_ms']}\n"
                 f"> delta:  {(master_progress - user_playing['progress_ms']) / 1000} seconds\n"
                 f"| Master Progress | {master_progress}\n"
-                # f"| TimeStamp Delta | {timestamp_delta}\n"
                 f"|  Request Delta  | {request_delta}\n"
                 f"|  Fine Progress  | {fine_progress_ms}\n"
             )
@@ -283,8 +274,6 @@ POS: {position_ms}""")
         user.message = ""
 
         remaining = int((user_playing["item"]["duration_ms"] - user_playing["progress_ms"]) / 1000)
-        # logger.debug(remaining)
-        # logger.debug(self.last_beat_duration * 8)
 
         if remaining < math.ceil(self.last_beat_duration * 8):
             user.pass_sync_for_cycles = max(
@@ -296,4 +285,8 @@ POS: {position_ms}""")
                 Setting new pass amount: {user.pass_sync_for_cycles}"""
             )
         else:
-            user.pass_sync_for_cycles = 8  # will not do user check for X cycles
+            # Steady state: skip this listener for 8 beats. Purely a Spotify API
+            # budget -- a synced listener cannot drift audibly in that window,
+            # and the branch above shortens the skip as the track end
+            # approaches, so the next-track handoff is never slept through.
+            user.pass_sync_for_cycles = 8

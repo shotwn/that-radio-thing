@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import re
 import secrets
-import sqlite3
 import time
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -17,7 +16,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from aiohttp import web
 from logzero import logger
 
-from thatradiothing.db import VersionConflict, playlist_id_from_uri
+from thatradiothing.config import CATALOG_REFRESH_MAX_SECONDS, CATALOG_REFRESH_MIN_SECONDS
+from thatradiothing.db import OverrideExists, VersionConflict, playlist_id_from_uri
 from thatradiothing.jwt_auth import verify_auth_token
 from thatradiothing.recurrence import (
     RecurrenceError,
@@ -49,7 +49,28 @@ SERIES_FIELDS = {
     "rdates",
     "exdates",
 }
+# A tuple, not a set: update_settings validates in this order, and the first
+# failure is what the client sees. Set iteration order varies between processes
+# under hash randomization, which would make the reported error nondeterministic
+# when a request carries more than one invalid setting.
+SETTING_FIELDS: tuple[str, ...] = (
+    "default_playlist_id",
+    "default_timezone",
+    "catalog_refresh_interval_seconds",
+)
 REQUEST_ID_KEY = web.RequestKey("admin_request_id", str)
+
+# Domain exceptions the error middleware translates into the stable envelope.
+# Handlers let these propagate rather than mapping them individually: a new
+# handler that forgets an ``except`` arm would otherwise return 500 for what is
+# really a client error. ``VersionConflict`` is handled separately because it
+# carries expected/actual versions in ``details``.
+DOMAIN_ERRORS: dict[type[Exception], tuple[str, int]] = {
+    RecurrenceError: ("invalid_schedule", 422),
+    CatalogError: ("playlist_unavailable", 422),
+    OverrideExists: ("override_exists", 409),
+}
+DOMAIN_ERROR_TYPES = tuple(DOMAIN_ERRORS)
 
 
 class AdminAPI:
@@ -62,6 +83,7 @@ class AdminAPI:
         self.trt = web_server.trt
         self._recent_mutation_ids: dict[str, float] = {}
         self._mutation_id_ttl = 120.0
+        self._admin_root = Path("static/admin").resolve()
 
     def register(self) -> None:
         """Register static control-room and versioned JSON routes exactly once."""
@@ -109,6 +131,23 @@ class AdminAPI:
             request[REQUEST_ID_KEY] = self._new_request_id(request)
             try:
                 response = await handler(request)
+            except VersionConflict as exc:
+                if not request.path.startswith("/api/admin/"):
+                    raise
+                response = self._error_response(
+                    request,
+                    "version_conflict",
+                    str(exc),
+                    409,
+                    {"expected": exc.expected, "actual": exc.actual},
+                )
+            except DOMAIN_ERROR_TYPES as exc:
+                if not request.path.startswith("/api/admin/"):
+                    raise
+                code, status = next(
+                    DOMAIN_ERRORS[base] for base in type(exc).__mro__ if base in DOMAIN_ERRORS
+                )
+                response = self._error_response(request, code, str(exc), status)
             except web.HTTPException as exc:
                 if not request.path.startswith("/api/admin/"):
                     raise
@@ -124,10 +163,7 @@ class AdminAPI:
                     428: "precondition_required",
                 }.get(exc.status, "admin_api_error")
                 response = self._error_response(
-                    code,
-                    exc.reason or "Admin API request failed",
-                    exc.status,
-                    self._request_id(request),
+                    request, code, exc.reason or "Admin API request failed", exc.status
                 )
             except Exception:
                 if not request.path.startswith("/api/admin/"):
@@ -137,10 +173,7 @@ class AdminAPI:
                     self._request_id(request),
                 )
                 response = self._error_response(
-                    "internal_error",
-                    "The admin request could not be completed",
-                    500,
-                    self._request_id(request),
+                    request, "internal_error", "The admin request could not be completed", 500
                 )
             response.headers["X-Request-ID"] = self._request_id(request)
             return response
@@ -171,9 +204,14 @@ class AdminAPI:
         return await self._static_admin_file(tail)
 
     async def _static_admin_file(self, relative: str) -> web.StreamResponse:
-        """Resolve one file below ``static/admin`` without path traversal."""
+        """Resolve one file below ``static/admin`` without path traversal.
 
-        root = Path("static/admin").resolve()
+        The root is resolved once at construction: ``Path.resolve()`` walks the
+        filesystem, and a cold SPA load asks for this path once per bundled
+        asset.
+        """
+
+        root = self._admin_root
         target = (root / relative).resolve()
         if not target.is_relative_to(root):
             raise web.HTTPNotFound()
@@ -232,7 +270,7 @@ class AdminAPI:
         if claims.get("provider") != "spotify":
             return None, web.HTTPForbidden(reason="A Spotify session is required")
         spotify_id = claims.get("providerUserId")
-        if spotify_id not in set(self.trt.admin_ids):
+        if spotify_id not in self.trt.admin_ids:
             return None, web.HTTPForbidden(reason="Radio administrator permission required")
         if mutation:
             origin_error = self._check_origin(request)
@@ -331,13 +369,62 @@ class AdminAPI:
         return web.json_response(value, status=status, headers={"Cache-Control": "no-store"})
 
     def _error_response(
-        self, code: str, message: str, status: int, request_id: str, details: Any = None
+        self, request: web.Request, code: str, message: str, status: int, details: Any = None
     ) -> web.Response:
-        """Create the stable machine-readable error envelope."""
+        """Create the stable machine-readable error envelope.
+
+        The correlation ID is resolved from *request* rather than passed in, so
+        no caller can accidentally emit an envelope carrying a different
+        request's ID than the one middleware logged.
+        """
 
         return self._json_response(
-            {"code": code, "message": message, "details": details, "request_id": request_id}, status
+            {
+                "code": code,
+                "message": message,
+                "details": details,
+                "request_id": self._request_id(request),
+            },
+            status,
         )
+
+    def _reject_unknown(
+        self, request: web.Request, body: dict[str, Any], allowed: set[str], noun: str
+    ) -> web.Response | None:
+        """Return a 400 envelope when *body* carries fields we do not accept.
+
+        Rejecting rather than ignoring unknown fields keeps a typo in a client
+        payload from silently doing nothing.
+        """
+
+        unknown = set(body) - allowed
+        if not unknown:
+            return None
+        return self._error_response(
+            request,
+            "unknown_fields",
+            f"Unsupported {noun} fields: {', '.join(sorted(unknown))}",
+            400,
+        )
+
+    async def _require_enabled_playlist(self, playlist_id: Any, label: str) -> dict[str, Any]:
+        """Return the playlist row, or raise if it is missing or disabled.
+
+        ``get_playlist`` deliberately returns disabled rows so administrators
+        can still inspect them, which means every scheduling caller has to
+        re-check ``enabled``. Centralizing that here keeps the definition of a
+        *usable* playlist in one place.
+
+        Raises:
+            CatalogError: Mapped to a 422 ``playlist_unavailable`` envelope by
+                the error middleware.
+
+        """
+
+        playlist = await self.trt.db.get_playlist(str(playlist_id))
+        if not playlist or not playlist.get("enabled", True):
+            raise CatalogError(f"{label} playlist is missing or disabled")
+        return playlist
 
     async def _audit(
         self,
@@ -420,6 +507,9 @@ class AdminAPI:
         master = self.trt.master.master_user
         profile = master.spotify_profile if master and master.spotify_profile else None
         settings = await self.trt.db.get_settings()
+        # One snapshot for both fields: status() rebuilds timestamps and copies
+        # catalog_errors on every call, and this runs on the push path.
+        schedule = self.trt.schedule_coordinator.status()
         return {
             "autodj": self.trt.autodj.snapshot(),
             "master": {
@@ -428,7 +518,7 @@ class AdminAPI:
                 "spotify_id": profile.get("id") if profile else None,
             },
             "listeners": self.trt.master.last_listener_count,
-            "schedule": self.trt.schedule_coordinator.status(),
+            "schedule": schedule,
             "playlists": await self.trt.db.list_playlist_summaries(),
             "settings": settings,
             "default_playlist_id": settings.get("default_playlist_id", {}).get("value")
@@ -438,7 +528,7 @@ class AdminAPI:
                 self.trt.autodj.selected_playlist
                 and self.trt.schedule_coordinator.last_error is None
             ),
-            "degraded": self.trt.schedule_coordinator.status().get("degraded", False),
+            "degraded": schedule.get("degraded", False),
         }
 
     async def audit(self, request: web.Request) -> web.Response:
@@ -468,120 +558,87 @@ class AdminAPI:
         if error:
             raise error
         body = await self._json(request)
+        if response := self._reject_unknown(
+            request, body, {*SETTING_FIELDS, "versions"}, "setting"
+        ):
+            return response
         changed: dict[str, Any] = {}
         before = await self.trt.db.get_settings()
-        for key in ("default_playlist_id", "default_timezone", "catalog_refresh_interval_seconds"):
+        for key in SETTING_FIELDS:
             if key not in body:
                 continue
-            if key == "default_playlist_id":
-                playlist = await self.trt.db.get_playlist(str(body[key]))
-                if not playlist or not playlist.get("enabled", True):
-                    return self._error_response(
-                        "playlist_unavailable",
-                        "Default playlist is missing or disabled",
-                        422,
-                        self._request_id(request),
-                    )
-            if key == "default_timezone" and not isinstance(body[key], str):
-                return self._error_response(
-                    "invalid_timezone",
-                    "default_timezone must be an IANA timezone string",
-                    422,
-                    self._request_id(request),
-                )
-            if key == "default_timezone":
-                try:
-                    ZoneInfo(body[key])
-                except (ZoneInfoNotFoundError, ValueError):
-                    return self._error_response(
-                        "invalid_timezone",
-                        "default_timezone must be an IANA timezone string",
-                        422,
-                        self._request_id(request),
-                    )
-            if key == "catalog_refresh_interval_seconds":
-                try:
-                    interval = int(body[key])
-                except (TypeError, ValueError):
-                    return self._error_response(
-                        "invalid_refresh_interval",
-                        "catalog_refresh_interval_seconds must be an integer",
-                        422,
-                        self._request_id(request),
-                    )
-                if interval < 300 or interval > 7 * 24 * 60 * 60:
-                    return self._error_response(
-                        "invalid_refresh_interval",
-                        "catalog_refresh_interval_seconds must be between 300 and 604800",
-                        422,
-                        self._request_id(request),
-                    )
-                changed[key] = interval
-            else:
-                changed[key] = body[key]
-        unknown = set(body) - {
-            "default_playlist_id",
-            "default_timezone",
-            "catalog_refresh_interval_seconds",
-            "versions",
-        }
-        if unknown:
-            return self._error_response(
-                "unknown_fields",
-                f"Unsupported setting fields: {', '.join(sorted(unknown))}",
-                400,
-                self._request_id(request),
-            )
+            value, response = await self._validated_setting(request, key, body[key])
+            if response:
+                return response
+            changed[key] = value
         if not changed:
             return self._json_response(before)
 
         versions = body.get("versions")
         if not isinstance(versions, dict):
             return self._error_response(
+                request,
                 "precondition_required",
                 "versions is required for every setting update",
                 428,
-                self._request_id(request),
             )
         missing_versions = [
             key for key in changed if key in before and not isinstance(versions.get(key), int)
         ]
         if missing_versions:
             return self._error_response(
+                request,
                 "precondition_required",
-                f"Missing setting versions: {', '.join(missing_versions)}",
+                f"Missing setting versions: {', '.join(sorted(missing_versions))}",
                 428,
-                self._request_id(request),
             )
         expected_versions = {
             key: versions.get(key) for key in changed if isinstance(versions.get(key), int)
         }
+        await self.trt.db.set_settings(changed, actor["providerUserId"], expected_versions)
+        after = await self.trt.db.get_settings()
+        await self._audit(actor, request, "settings.update", "settings", None, before, after)
+        self.trt.schedule_coordinator.wake()
+        return self._json_response(after)
+
+    async def _validated_setting(
+        self, request: web.Request, key: str, raw: Any
+    ) -> tuple[Any, web.Response | None]:
+        """Coerce and range-check one setting, or return its 422 envelope."""
+
+        if key == "default_playlist_id":
+            await self._require_enabled_playlist(raw, "Default")
+            return raw, None
+        if key == "default_timezone":
+            try:
+                # ZoneInfo raises TypeError on a non-string, which covers the
+                # type check as well as the "no such zone" case.
+                ZoneInfo(raw)
+            except (ZoneInfoNotFoundError, ValueError, TypeError):
+                return None, self._error_response(
+                    request,
+                    "invalid_timezone",
+                    "default_timezone must be an IANA timezone string",
+                    422,
+                )
+            return raw, None
         try:
-            await self.trt.db.set_settings(
-                changed,
-                actor["providerUserId"],
-                expected_versions,
-            )
-        except VersionConflict as exc:
-            return self._error_response(
-                "version_conflict",
-                str(exc),
-                409,
-                self._request_id(request),
-                {"expected": exc.expected, "actual": exc.actual},
-            )
-        if changed:
-            await self._audit(
-                actor,
+            interval = int(raw)
+        except (TypeError, ValueError):
+            return None, self._error_response(
                 request,
-                "settings.update",
-                "settings",
-                None,
-                before,
-                await self.trt.db.get_settings(),
+                "invalid_refresh_interval",
+                "catalog_refresh_interval_seconds must be an integer",
+                422,
             )
-            self.trt.schedule_coordinator.wake()
-        return self._json_response(await self.trt.db.get_settings())
+        if not CATALOG_REFRESH_MIN_SECONDS <= interval <= CATALOG_REFRESH_MAX_SECONDS:
+            return None, self._error_response(
+                request,
+                "invalid_refresh_interval",
+                f"catalog_refresh_interval_seconds must be between {CATALOG_REFRESH_MIN_SECONDS} and {CATALOG_REFRESH_MAX_SECONDS}",
+                422,
+            )
+        return interval, None
 
     async def playlists(self, request: web.Request) -> web.Response:
         """List compact playlist metadata for administration views."""
@@ -612,20 +669,12 @@ class AdminAPI:
         uri = str(body.get("spotify_uri") or body.get("uri") or "")
         if not playlist_id_from_uri(uri):
             return self._error_response(
-                "invalid_playlist",
-                "A Spotify playlist URI or URL is required",
-                422,
-                self._request_id(request),
+                request, "invalid_playlist", "A Spotify playlist URI or URL is required", 422
             )
         existing = await self.trt.db.get_playlist_by_uri(
             f"spotify:playlist:{playlist_id_from_uri(uri)}"
         )
-        try:
-            catalog = await self.trt.autodj.catalog_client.fetch(uri)
-        except CatalogError as exc:
-            return self._error_response(
-                "playlist_unavailable", str(exc), 422, self._request_id(request)
-            )
+        catalog = await self.trt.autodj.catalog_client.fetch(uri)
         row = await self.trt.db.upsert_playlist(
             {
                 "spotify_uri": catalog.spotify_uri,
@@ -659,14 +708,8 @@ class AdminAPI:
         if not before:
             raise web.HTTPNotFound()
         body = await self._json(request)
-        unknown = set(body) - {"name", "enabled"}
-        if unknown:
-            return self._error_response(
-                "unknown_fields",
-                f"Unsupported playlist fields: {', '.join(sorted(unknown))}",
-                400,
-                self._request_id(request),
-            )
+        if response := self._reject_unknown(request, body, {"name", "enabled"}, "playlist"):
+            return response
         changes: dict[str, Any] = {}
         if "name" in body:
             if (
@@ -675,29 +718,26 @@ class AdminAPI:
                 or len(body["name"].strip()) > 200
             ):
                 return self._error_response(
+                    request,
                     "invalid_playlist_name",
                     "name must contain between 1 and 200 characters",
                     422,
-                    self._request_id(request),
                 )
             changes["name"] = body["name"].strip()
         if "enabled" in body:
             if not isinstance(body["enabled"], bool):
                 return self._error_response(
-                    "invalid_enabled",
-                    "enabled must be a boolean",
-                    422,
-                    self._request_id(request),
+                    request, "invalid_enabled", "enabled must be a boolean", 422
                 )
             if not body["enabled"]:
                 default_id = await self.trt.db.get_setting("default_playlist_id")
                 references = await self.trt.db.playlist_reference_count(playlist_id)
                 if default_id == playlist_id or references:
                     return self._error_response(
+                        request,
                         "playlist_referenced",
                         "A default or scheduled playlist cannot be disabled",
                         409,
-                        self._request_id(request),
                         {"schedule_count": references},
                     )
             changes["enabled"] = body["enabled"]
@@ -724,10 +764,10 @@ class AdminAPI:
         references = await self.trt.db.playlist_reference_count(playlist_id)
         if default_id == playlist_id or references:
             return self._error_response(
+                request,
                 "playlist_referenced",
                 "Playlist is the default or used by a schedule",
                 409,
-                self._request_id(request),
                 {"schedule_count": references},
             )
         await self.trt.db.delete_playlist(playlist_id)
@@ -751,12 +791,12 @@ class AdminAPI:
                 actor["providerUserId"],
             )
         except CatalogError as exc:
+            # Record why the catalog is stale before letting the middleware
+            # turn this into the 422 envelope.
             await self.trt.db.patch_playlist(
                 playlist_id, {"validation_error": str(exc)}, actor["providerUserId"]
             )
-            return self._error_response(
-                "playlist_unavailable", str(exc), 422, self._request_id(request)
-            )
+            raise
         self.trt.schedule_coordinator.catalog_errors.pop(playlist_id, None)
         await self._audit(
             actor, request, "playlist.refresh", "playlist", playlist_id, before, after
@@ -800,33 +840,18 @@ class AdminAPI:
         if error:
             raise error
         body = await self._json(request)
-        unknown = set(body) - SERIES_FIELDS
-        if unknown:
-            return self._error_response(
-                "unknown_fields",
-                f"Unsupported schedule fields: {', '.join(sorted(unknown))}",
-                400,
-                self._request_id(request),
-            )
+        if response := self._reject_unknown(request, body, SERIES_FIELDS, "schedule"):
+            return response
         draft = self._series_values(body, defaults=True)
         draft["id"] = str(uuid.uuid4())
         try:
             validate_series(draft)
-            playlist = await self.trt.db.get_playlist(str(draft.get("playlist_id") or ""))
-            if not playlist or not playlist.get("enabled", True):
-                return self._error_response(
-                    "playlist_unavailable",
-                    "Schedule playlist is missing or disabled",
-                    422,
-                    self._request_id(request),
-                )
+            await self._require_enabled_playlist(draft.get("playlist_id") or "", "Schedule")
             start = datetime.now(UTC) - timedelta(days=1)
             end = start + timedelta(days=180)
             occurrences = occurrences_between(draft, start, end, 100)
         except (RecurrenceError, ValueError) as exc:
-            return self._error_response(
-                "invalid_schedule", str(exc), 422, self._request_id(request)
-            )
+            return self._error_response(request, "invalid_schedule", str(exc), 422)
         return self._json_response({"items": [item.as_dict() for item in occurrences]})
 
     def _series_values(
@@ -857,35 +882,20 @@ class AdminAPI:
         if error:
             raise error
         body = await self._json(request)
-        unknown = set(body) - SERIES_FIELDS
-        if unknown:
-            return self._error_response(
-                "unknown_fields",
-                f"Unsupported schedule fields: {', '.join(sorted(unknown))}",
-                400,
-                self._request_id(request),
-            )
+        if response := self._reject_unknown(request, body, SERIES_FIELDS, "schedule"):
+            return response
         values = self._series_values(body, defaults=True)
         if "timezone" not in body:
             values["timezone"] = await self.trt.db.get_setting(
                 "default_timezone", self.trt.schedule_timezone
             )
-        playlist = await self.trt.db.get_playlist(str(values.get("playlist_id") or ""))
-        if not playlist or not playlist.get("enabled", True):
-            return self._error_response(
-                "playlist_unavailable",
-                "Schedule playlist is missing or disabled",
-                422,
-                self._request_id(request),
-            )
+        await self._require_enabled_playlist(values.get("playlist_id") or "", "Schedule")
         values["id"] = str(uuid.uuid4())
         try:
             validate_series(values)
             row = await self.trt.db.create_schedule_series(values, actor["providerUserId"])
         except (RecurrenceError, ValueError) as exc:
-            return self._error_response(
-                "invalid_schedule", str(exc), 422, self._request_id(request)
-            )
+            return self._error_response(request, "invalid_schedule", str(exc), 422)
         await self._audit(
             actor, request, "schedule.create", "schedule_series", row["id"], None, row
         )
@@ -914,32 +924,16 @@ class AdminAPI:
         if not before:
             raise web.HTTPNotFound()
         body = await self._json(request)
-        unknown = set(body) - SERIES_FIELDS - {"version"}
-        if unknown:
-            return self._error_response(
-                "unknown_fields",
-                f"Unsupported schedule fields: {', '.join(sorted(unknown))}",
-                400,
-                self._request_id(request),
-            )
+        if response := self._reject_unknown(request, body, SERIES_FIELDS | {"version"}, "schedule"):
+            return response
         if not isinstance(body.get("version"), int):
             return self._error_response(
-                "precondition_required",
-                "The current integer version is required",
-                428,
-                self._request_id(request),
+                request, "precondition_required", "The current integer version is required", 428
             )
         patch_values = self._series_values(body, defaults=False)
         values = {**before, **patch_values}
         values["id"] = series_id
-        playlist = await self.trt.db.get_playlist(str(values.get("playlist_id") or ""))
-        if not playlist or not playlist.get("enabled", True):
-            return self._error_response(
-                "playlist_unavailable",
-                "Schedule playlist is missing or disabled",
-                422,
-                self._request_id(request),
-            )
+        await self._require_enabled_playlist(values.get("playlist_id") or "", "Schedule")
         try:
             validate_series(values)
             after = await self.trt.db.update_schedule_series(
@@ -948,18 +942,8 @@ class AdminAPI:
                 actor["providerUserId"],
                 body["version"],
             )
-        except VersionConflict as exc:
-            return self._error_response(
-                "version_conflict",
-                str(exc),
-                409,
-                self._request_id(request),
-                {"expected": exc.expected, "actual": exc.actual},
-            )
         except (RecurrenceError, ValueError) as exc:
-            return self._error_response(
-                "invalid_schedule", str(exc), 422, self._request_id(request)
-            )
+            return self._error_response(request, "invalid_schedule", str(exc), 422)
         await self._audit(
             actor, request, "schedule.update", "schedule_series", series_id, before, after
         )
@@ -980,25 +964,16 @@ class AdminAPI:
             expected_version = int(request.query.get("version", ""))
         except ValueError:
             return self._error_response(
+                request,
                 "precondition_required",
                 "The current version query parameter is required",
                 428,
-                self._request_id(request),
             )
-        try:
-            await self.trt.db.delete_schedule_series(
-                series_id,
-                actor["providerUserId"],
-                expected_version,
-            )
-        except VersionConflict as exc:
-            return self._error_response(
-                "version_conflict",
-                str(exc),
-                409,
-                self._request_id(request),
-                {"expected": exc.expected, "actual": exc.actual},
-            )
+        await self.trt.db.delete_schedule_series(
+            series_id,
+            actor["providerUserId"],
+            expected_version,
+        )
         await self._audit(
             actor, request, "schedule.delete", "schedule_series", series_id, before, None
         )
@@ -1027,22 +1002,13 @@ class AdminAPI:
             "priority",
             "version",
         }
-        unknown = set(body) - allowed_fields
-        if unknown:
-            return self._error_response(
-                "unknown_fields",
-                f"Unsupported exception fields: {', '.join(sorted(unknown))}",
-                400,
-                self._request_id(request),
-            )
+        if response := self._reject_unknown(request, body, allowed_fields, "exception"):
+            return response
         if body.get("action") not in {"cancel", "override"} or not body.get("original_start_utc"):
             raise web.HTTPBadRequest(reason="action and original_start_utc are required")
         if not isinstance(body.get("version"), int):
             return self._error_response(
-                "precondition_required",
-                "The current integer version is required",
-                428,
-                self._request_id(request),
+                request, "precondition_required", "The current integer version is required", 428
             )
         try:
             original_start = parse_utc(str(body["original_start_utc"]))
@@ -1054,14 +1020,7 @@ class AdminAPI:
             if body["action"] == "override":
                 playlist_id = body.get("playlist_id")
                 if playlist_id:
-                    playlist = await self.trt.db.get_playlist(str(playlist_id))
-                    if not playlist or not playlist.get("enabled", True):
-                        return self._error_response(
-                            "playlist_unavailable",
-                            "Override playlist is missing or disabled",
-                            422,
-                            self._request_id(request),
-                        )
+                    await self._require_enabled_playlist(playlist_id, "Override")
                 # Reuse the domain resolver to validate timezone, start, and
                 # duration fields before writing an override that could make
                 # the coordinator ignore an otherwise valid series.
@@ -1074,32 +1033,14 @@ class AdminAPI:
             OverflowError,
             ZoneInfoNotFoundError,
         ) as exc:
-            return self._error_response(
-                "invalid_schedule", str(exc), 422, self._request_id(request)
-            )
+            return self._error_response(request, "invalid_schedule", str(exc), 422)
         override_values = {key: body[key] for key in allowed_fields - {"version"} if key in body}
-        try:
-            row = await self.trt.db.add_override(
-                series_id,
-                override_values,
-                actor["providerUserId"],
-                body["version"],
-            )
-        except VersionConflict as exc:
-            return self._error_response(
-                "version_conflict",
-                str(exc),
-                409,
-                self._request_id(request),
-                {"expected": exc.expected, "actual": exc.actual},
-            )
-        except sqlite3.IntegrityError:
-            return self._error_response(
-                "override_exists",
-                "An exception already exists for this occurrence",
-                409,
-                self._request_id(request),
-            )
+        row = await self.trt.db.add_override(
+            series_id,
+            override_values,
+            actor["providerUserId"],
+            body["version"],
+        )
         await self._audit(
             actor, request, "schedule.exception", "schedule_override", row.get("id"), None, row
         )
@@ -1119,10 +1060,7 @@ class AdminAPI:
         body = await self._json(request)
         if not isinstance(body.get("version"), int):
             return self._error_response(
-                "precondition_required",
-                "The current integer version is required",
-                428,
-                self._request_id(request),
+                request, "precondition_required", "The current integer version is required", 428
             )
         raw_future_values = body.get("values") or {}
         if not isinstance(raw_future_values, dict):
@@ -1130,10 +1068,10 @@ class AdminAPI:
         unknown = set(raw_future_values) - SERIES_FIELDS
         if unknown:
             return self._error_response(
+                request,
                 "unknown_fields",
                 f"Unsupported schedule fields: {', '.join(sorted(unknown))}",
                 400,
-                self._request_id(request),
             )
         future = {
             **original,
@@ -1180,14 +1118,7 @@ class AdminAPI:
                 if parse_utc(str(override["original_start_utc"])) >= effective_utc
             ]
             validate_series(future)
-            playlist = await self.trt.db.get_playlist(str(future.get("playlist_id") or ""))
-            if not playlist or not playlist.get("enabled", True):
-                return self._error_response(
-                    "playlist_unavailable",
-                    "Schedule playlist is missing or disabled",
-                    422,
-                    self._request_id(request),
-                )
+            await self._require_enabled_playlist(future.get("playlist_id") or "", "Schedule")
             updated, created = await self.trt.db.split_schedule_series(
                 series_id,
                 {
@@ -1203,18 +1134,8 @@ class AdminAPI:
             )
             if not updated or not created:
                 raise web.HTTPNotFound()
-        except (RecurrenceError, ValueError, VersionConflict) as exc:
-            if isinstance(exc, VersionConflict):
-                return self._error_response(
-                    "version_conflict",
-                    str(exc),
-                    409,
-                    self._request_id(request),
-                    {"expected": exc.expected, "actual": exc.actual},
-                )
-            return self._error_response(
-                "invalid_schedule", str(exc), 422, self._request_id(request)
-            )
+        except (RecurrenceError, ValueError) as exc:
+            return self._error_response(request, "invalid_schedule", str(exc), 422)
         await self._audit(
             actor, request, "schedule.split", "schedule_series", series_id, original, created
         )
@@ -1267,17 +1188,14 @@ class AdminAPI:
                 {"reason": "human_master_active"},
             )
             return self._error_response(
+                request,
                 "human_master_active",
                 "AutoDJ controls are unavailable while a human DJ is master",
                 409,
-                self._request_id(request),
             )
         if self._reserve_mutation_id(request) is None:
             return self._error_response(
-                "duplicate_request",
-                "This control request was already accepted",
-                409,
-                self._request_id(request),
+                request, "duplicate_request", "This control request was already accepted", 409
             )
         before = self.trt.autodj.snapshot()
         try:
@@ -1305,6 +1223,6 @@ class AdminAPI:
                 before,
                 {"error": str(exc)},
             )
-            return self._error_response("playback_failed", str(exc), 422, self._request_id(request))
+            return self._error_response(request, "playback_failed", str(exc), 422)
         await self._audit(actor, request, f"playback.{action}", "autodj", "AUTODJ", before, after)
         return self._json_response(after)
