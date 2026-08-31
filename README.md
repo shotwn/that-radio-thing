@@ -212,7 +212,7 @@ The same release checks run locally and in GitLab CI:
 pip install -r requirements-dev.txt
 ruff format --check main.py thatradiothing scripts tests
 ruff check main.py thatradiothing scripts tests
-python -m unittest discover -s tests -v
+python -m unittest discover -s tests -t . -v
 
 cd admin
 npm ci

@@ -27,7 +27,11 @@ python_checks:
     - pip install --disable-pip-version-check -r requirements-dev.txt
     - ruff format --check main.py thatradiothing scripts tests
     - ruff check main.py thatradiothing scripts tests
-    - python -m unittest discover -s tests -v
+    # -t . makes the repository root the top-level directory so `tests` is
+    # imported as a package. Without it unittest puts tests/ itself on sys.path,
+    # tests/__init__.py never runs, and the modules that import thatradiothing
+    # fail on missing configuration instead of using the test placeholders.
+    - python -m unittest discover -s tests -t . -v
 
 admin_checks:
   stage: verify
