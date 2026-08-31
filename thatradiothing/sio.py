@@ -59,11 +59,18 @@ class SocketIOGateway:
         self.web_server = web_server
         self.trt = web_server.trt
 
-        # Per-sid cache of the last payload we emitted. Used for diffing.
+        # Per-sid cache of the last listener payload we emitted, used for
+        # diffing. Membership of this dict is also what marks a sid as live,
+        # so every connected socket gets an entry regardless of role.
         self._last_payloads = {}
         # Per-sid monotonic timestamp of the last emit, so we can ratchet
         # the progress-bar heartbeat independently of the diff.
         self._last_emit_monotonic = {}
+        # The admin control-room stream is tracked separately. It is an extra
+        # channel layered on top of the listener stream, never a replacement,
+        # so it needs its own diff cache and heartbeat clock.
+        self._last_admin_payloads = {}
+        self._last_admin_emit_monotonic = {}
         self._push_task = None
 
         cors_origins = self._resolve_cors_origins()
@@ -122,17 +129,24 @@ class SocketIOGateway:
                 )
 
             # Send an initial snapshot so the client doesn't wait a tick.
+            #
+            # Administrators are listeners too. They always receive the normal
+            # listener ``status`` event -- it is what carries can_be_master,
+            # profile, devices and message, and duudey.com's player subscribes
+            # to nothing else. ``admin_status`` is emitted in addition for the
+            # control room, never instead.
             try:
                 async with sio.session(sid) as session:
                     is_admin = bool(session.get("is_admin"))
-                payload = (
-                    await self.web_server.admin_api.status_payload()
-                    if is_admin
-                    else await self.web_server.build_status_payload(user)
-                )
+                payload = await self.web_server.build_status_payload(user)
                 self._last_payloads[sid] = payload
                 self._last_emit_monotonic[sid] = time.monotonic()
-                await sio.emit(ADMIN_STATUS_EVENT if is_admin else STATUS_EVENT, payload, to=sid)
+                await sio.emit(STATUS_EVENT, payload, to=sid)
+                if is_admin:
+                    admin_payload = await self.web_server.admin_api.status_payload()
+                    self._last_admin_payloads[sid] = admin_payload
+                    self._last_admin_emit_monotonic[sid] = time.monotonic()
+                    await sio.emit(ADMIN_STATUS_EVENT, admin_payload, to=sid)
             except Exception:  # noqa: BLE001 - connection survives emit failures
                 logger.exception("initial status emit failed")
 
@@ -142,6 +156,8 @@ class SocketIOGateway:
 
             self._last_payloads.pop(sid, None)
             self._last_emit_monotonic.pop(sid, None)
+            self._last_admin_payloads.pop(sid, None)
+            self._last_admin_emit_monotonic.pop(sid, None)
 
     # --- push loop --------------------------------------------------------
 
@@ -181,8 +197,11 @@ class SocketIOGateway:
                 session_id = session.get("session_id")
                 is_admin = bool(session.get("is_admin"))
         except KeyError:
-            # Socket already gone; drop the last-payload slot.
+            # Socket already gone; drop every cached slot so neither stream leaks.
             self._last_payloads.pop(sid, None)
+            self._last_emit_monotonic.pop(sid, None)
+            self._last_admin_payloads.pop(sid, None)
+            self._last_admin_emit_monotonic.pop(sid, None)
             return
 
         if not session_id:
@@ -198,23 +217,43 @@ class SocketIOGateway:
             await self._drop(sid)
             return
 
-        if is_admin:
-            payload = await self._shared_admin_payload(tick_cache if tick_cache is not None else {})
-        else:
-            payload = await self.web_server.build_status_payload(user)
-        last_payload = self._last_payloads.get(sid)
+        # The listener stream goes to every socket, administrator or not. It
+        # is the only source of can_be_master/profile/devices for the site
+        # player, so suppressing it for admins silently strips a listener of
+        # their master controls.
+        payload = await self.web_server.build_status_payload(user)
+        now = time.monotonic()
+        if self._should_emit(sid, payload, self._last_payloads, self._last_emit_monotonic, now):
+            self._last_payloads[sid] = payload
+            self._last_emit_monotonic[sid] = now
+            await self.sio.emit(STATUS_EVENT, payload, to=sid)
+
+        if not is_admin:
+            return
+
+        admin_payload = await self._shared_admin_payload(
+            tick_cache if tick_cache is not None else {}
+        )
+        if self._should_emit(
+            sid,
+            admin_payload,
+            self._last_admin_payloads,
+            self._last_admin_emit_monotonic,
+            now,
+        ):
+            self._last_admin_payloads[sid] = admin_payload
+            self._last_admin_emit_monotonic[sid] = now
+            await self.sio.emit(ADMIN_STATUS_EVENT, admin_payload, to=sid)
+
+    def _should_emit(self, sid, payload, payload_cache, emit_cache, now):
+        """Report whether a stream changed, or is due its drift-correcting beat."""
+
+        last_payload = payload_cache.get(sid)
         content_changed = last_payload is None or self._diff_key(payload) != self._diff_key(
             last_payload
         )
-
-        now = time.monotonic()
-        last_emit = self._last_emit_monotonic.get(sid, 0.0)
-        heartbeat_due = (now - last_emit) >= HEARTBEAT_INTERVAL_SECONDS
-
-        if content_changed or heartbeat_due:
-            self._last_payloads[sid] = payload
-            self._last_emit_monotonic[sid] = now
-            await self.sio.emit(ADMIN_STATUS_EVENT if is_admin else STATUS_EVENT, payload, to=sid)
+        heartbeat_due = (now - emit_cache.get(sid, 0.0)) >= HEARTBEAT_INTERVAL_SECONDS
+        return content_changed or heartbeat_due
 
     def _diff_key(self, payload):
         """Return a payload view that ignores the per-second progress tick.
@@ -241,3 +280,5 @@ class SocketIOGateway:
         await self.sio.disconnect(sid)
         self._last_payloads.pop(sid, None)
         self._last_emit_monotonic.pop(sid, None)
+        self._last_admin_payloads.pop(sid, None)
+        self._last_admin_emit_monotonic.pop(sid, None)
