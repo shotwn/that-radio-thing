@@ -14,12 +14,12 @@ import pprint
 
 import logzero
 
-_LOG_LEVEL_NAME = os.getenv('LOG_LEVEL', 'INFO').upper()
+_LOG_LEVEL_NAME = os.getenv("LOG_LEVEL", "INFO").upper()
 _LOG_LEVEL = getattr(logging, _LOG_LEVEL_NAME, logging.INFO)
 
-_LOG_FILE = os.getenv('LOG_FILE', 'thatradiothing.log')
-_LOG_MAX_BYTES = int(os.getenv('LOG_MAX_BYTES', str(5 * 1024 * 1024)))
-_LOG_BACKUP_COUNT = int(os.getenv('LOG_BACKUP_COUNT', '5'))
+_LOG_FILE = os.getenv("LOG_FILE", "thatradiothing.log")
+_LOG_MAX_BYTES = int(os.getenv("LOG_MAX_BYTES", str(5 * 1024 * 1024)))
+_LOG_BACKUP_COUNT = int(os.getenv("LOG_BACKUP_COUNT", "5"))
 
 logzero.loglevel(_LOG_LEVEL)
 if _LOG_FILE:
@@ -31,17 +31,25 @@ if _LOG_FILE:
     )
 
 
-def format(thing):
+def format_value(thing):
+    """Return a readable representation suitable for diagnostic logging."""
+
     return pprint.pformat(thing)
 
 
 def info(thing):
-    logzero.logger.info(format(thing))
+    """Log *thing* at info level after formatting nested values."""
+
+    logzero.logger.info(format_value(thing))
 
 
 def debug(thing):
-    logzero.logger.debug(format(thing))
+    """Log *thing* at debug level after formatting nested values."""
+
+    logzero.logger.debug(format_value(thing))
 
 
 def error(thing):
-    logzero.logger.error(format(thing))
+    """Log *thing* at error level after formatting nested values."""
+
+    logzero.logger.error(format_value(thing))

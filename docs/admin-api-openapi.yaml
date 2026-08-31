@@ -1,0 +1,211 @@
+openapi: 3.1.0
+info:
+  title: ThatRadioThing administration API
+  version: 1.0.0
+  description: Cookie/JWT-authenticated API for radio programming and AutoDJ controls.
+servers:
+  - url: https://thatradiothing.duudey.com
+security:
+  - cookieAuth: []
+  - bearerAuth: []
+paths:
+  /api/admin/v1/session:
+    get:
+      summary: Get administrator identity and CSRF bootstrap
+      responses:
+        '200': {description: Authorized administrator session}
+        '401': {description: Missing or invalid session}
+        '403': {description: Authenticated user is not a radio administrator}
+  /api/admin/v1/status:
+    get:
+      summary: Get AutoDJ, master, schedule, and catalog status
+      responses:
+        '200': {description: Current operational status}
+  /api/admin/v1/audit:
+    get:
+      summary: Read the newest administrative audit entries
+      parameters:
+        - {in: query, name: limit, schema: {type: integer, minimum: 1, maximum: 500, default: 100}}
+      responses:
+        '200': {description: Bounded audit entry list}
+  /api/admin/v1/settings:
+    get:
+      summary: Read radio settings
+      responses:
+        '200': {description: Versioned settings}
+    patch:
+      summary: Update default playlist or schedule settings
+      security: [{cookieAuth: [], csrfHeader: []}, {bearerAuth: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/SettingsPatch'}}}}
+      responses:
+        '200': {description: Updated settings}
+        '409': {description: Optimistic version conflict}
+        '428': {description: Required setting versions are missing}
+  /api/admin/v1/playlists:
+    get:
+      summary: List registered Spotify playlists
+      responses: {'200': {description: Playlist records}}
+    post:
+      summary: Validate and register a Spotify playlist
+      security: [{cookieAuth: [], csrfHeader: []}, {bearerAuth: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/PlaylistCreate'}}}}
+      responses:
+        '201': {description: Registered playlist}
+        '422': {description: Playlist cannot be read or has no playable tracks}
+  /api/admin/v1/playlists/{playlist_id}:
+    get:
+      summary: Read one registered playlist
+      parameters: [{in: path, name: playlist_id, required: true, schema: {type: string}}]
+      responses: {'200': {description: Playlist record}, '404': {description: Not found}}
+    patch:
+      summary: Update playlist metadata or enabled state
+      security: [{cookieAuth: [], csrfHeader: []}, {bearerAuth: []}]
+      parameters: [{in: path, name: playlist_id, required: true, schema: {type: string}}]
+      responses: {'200': {description: Updated playlist}}
+    delete:
+      summary: Disable/remove an unreferenced playlist
+      security: [{cookieAuth: [], csrfHeader: []}, {bearerAuth: []}]
+      parameters: [{in: path, name: playlist_id, required: true, schema: {type: string}}]
+      responses: {'200': {description: Deleted playlist}, '409': {description: Playlist is referenced}}
+  /api/admin/v1/playlists/{playlist_id}/refresh:
+    post:
+      summary: Refresh a cached Spotify catalog
+      security: [{cookieAuth: [], csrfHeader: []}, {bearerAuth: []}]
+      parameters: [{in: path, name: playlist_id, required: true, schema: {type: string}}]
+      responses: {'200': {description: Refreshed playlist}}
+  /api/admin/v1/schedule:
+    get:
+      summary: Expand schedule occurrences in a bounded range
+      parameters:
+        - {in: query, name: from, schema: {type: string, format: date-time}}
+        - {in: query, name: to, schema: {type: string, format: date-time}}
+        - {in: query, name: limit, schema: {type: integer, minimum: 1, maximum: 1000, default: 500}}
+      responses: {'200': {description: Expanded occurrences}}
+  /api/admin/v1/schedule/preview:
+    post:
+      summary: Validate and preview a schedule draft
+      security: [{cookieAuth: [], csrfHeader: []}, {bearerAuth: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ScheduleSeriesWrite'}}}}
+      responses: {'200': {description: Preview occurrences and warnings}}
+  /api/admin/v1/schedule/series:
+    post:
+      summary: Create a schedule series
+      security: [{cookieAuth: [], csrfHeader: []}, {bearerAuth: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ScheduleSeriesWrite'}}}}
+      responses: {'201': {description: Created series}}
+  /api/admin/v1/schedule/series/{series_id}:
+    get:
+      summary: Read a schedule series
+      parameters: [{in: path, name: series_id, required: true, schema: {type: string}}]
+      responses: {'200': {description: Schedule series}}
+    patch:
+      summary: Update a schedule series
+      security: [{cookieAuth: [], csrfHeader: []}, {bearerAuth: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ScheduleSeriesPatch'}}}}
+      responses: {'200': {description: Updated series}, '409': {description: Version conflict}, '428': {description: Current version missing}}
+    delete:
+      summary: Delete a schedule series
+      security: [{cookieAuth: [], csrfHeader: []}, {bearerAuth: []}]
+      parameters:
+        - {in: path, name: series_id, required: true, schema: {type: string}}
+        - {in: query, name: version, required: true, schema: {type: integer, minimum: 1}}
+      responses: {'200': {description: Deleted series}, '409': {description: Version conflict}, '428': {description: Current version missing}}
+  /api/admin/v1/schedule/series/{series_id}/exceptions:
+    post:
+      summary: Cancel or override one occurrence
+      security: [{cookieAuth: [], csrfHeader: []}, {bearerAuth: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/OccurrenceException'}}}}
+      responses: {'201': {description: Exception created}}
+  /api/admin/v1/schedule/series/{series_id}/split:
+    post:
+      summary: Split a recurring series at a future start
+      security: [{cookieAuth: [], csrfHeader: []}, {bearerAuth: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/SeriesSplit'}}}}
+      responses: {'201': {description: Original and future series}}
+  /api/admin/v1/playback/skip-current:
+    post:
+      summary: Skip the current AutoDJ track
+      security: [{cookieAuth: [], csrfHeader: []}, {bearerAuth: []}]
+      responses: {'200': {description: New AutoDJ snapshot}, '409': {description: Human DJ is master}}
+  /api/admin/v1/playback/skip-next:
+    post:
+      summary: Replace the queued AutoDJ track
+      security: [{cookieAuth: [], csrfHeader: []}, {bearerAuth: []}]
+      responses: {'200': {description: New AutoDJ snapshot}, '409': {description: Human DJ is master}}
+  /api/admin/v1/playback/reload-playlist:
+    post:
+      summary: Reload the active AutoDJ playlist catalog
+      security: [{cookieAuth: [], csrfHeader: []}, {bearerAuth: []}]
+      responses: {'200': {description: Reloaded AutoDJ snapshot}, '409': {description: Human DJ is master}}
+components:
+  securitySchemes:
+    cookieAuth: {type: apiKey, in: cookie, name: duudey_auth}
+    bearerAuth: {type: http, scheme: bearer, bearerFormat: JWT}
+    csrfHeader: {type: apiKey, in: header, name: X-CSRF-Token}
+  schemas:
+    PlaylistCreate:
+      type: object
+      required: [spotify_uri]
+      properties:
+        spotify_uri: {type: string}
+    SettingsPatch:
+      type: object
+      required: [versions]
+      properties:
+        default_playlist_id: {type: string}
+        default_timezone: {type: string}
+        catalog_refresh_interval_seconds: {type: integer, minimum: 300, maximum: 604800}
+        versions:
+          type: object
+          additionalProperties: {type: integer, minimum: 0}
+      additionalProperties: false
+    ScheduleSeriesFields:
+      type: object
+      properties:
+        title: {type: string, minLength: 1, maxLength: 200}
+        playlist_id: {type: string}
+        dtstart_local: {type: string, description: Local wall-clock ISO date-time without an offset}
+        timezone: {type: string, description: IANA timezone name}
+        duration_seconds: {type: integer, minimum: 1, maximum: 604800}
+        rrule: {type: [string, 'null']}
+        priority: {type: integer, minimum: -1000, maximum: 1000, default: 0}
+        transition_policy: {type: string, enum: [immediate]}
+        enabled: {type: boolean}
+        rdates: {type: array, items: {type: string, format: date-time}}
+        exdates: {type: array, items: {type: string, format: date-time}}
+    ScheduleSeriesWrite:
+      allOf:
+        - {$ref: '#/components/schemas/ScheduleSeriesFields'}
+        - type: object
+          required: [title, playlist_id, dtstart_local, timezone, duration_seconds]
+      unevaluatedProperties: false
+    ScheduleSeriesPatch:
+      allOf:
+        - {$ref: '#/components/schemas/ScheduleSeriesFields'}
+        - type: object
+          required: [version]
+          properties:
+            version: {type: integer, minimum: 1}
+      unevaluatedProperties: false
+    OccurrenceException:
+      type: object
+      required: [action, original_start_utc, version]
+      properties:
+        action: {type: string, enum: [cancel, override]}
+        original_start_utc: {type: string, format: date-time}
+        version: {type: integer, minimum: 1}
+        title: {type: string}
+        playlist_id: {type: string}
+        start_local: {type: string}
+        timezone: {type: string}
+        duration_seconds: {type: integer, minimum: 1, maximum: 604800}
+        priority: {type: integer, minimum: -1000, maximum: 1000}
+      additionalProperties: false
+    SeriesSplit:
+      type: object
+      required: [effective_dtstart_local, values, version]
+      properties:
+        effective_dtstart_local: {type: string}
+        values: {$ref: '#/components/schemas/ScheduleSeriesWrite'}
+        version: {type: integer, minimum: 1}
+      additionalProperties: false

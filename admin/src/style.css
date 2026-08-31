@@ -1,0 +1,25 @@
+:root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, sans-serif; background: #101115; color: #f3f4f6; }
+* { box-sizing: border-box; }
+body { margin: 0; background: radial-gradient(circle at top right, #27222d, #101115 45%); min-height: 100vh; }
+button, input, select { font: inherit; }
+button { cursor: pointer; }
+.shell { max-width: 1440px; margin: 0 auto; padding: 24px; }
+.shell.embedded { max-width: none; padding: 12px; }
+.shell.embedded .topbar { display: none; }
+.topbar, .section-heading, .row, .audit-row, .two-col { display: flex; align-items: center; justify-content: space-between; gap: 20px; }
+.topbar { border-bottom: 1px solid #343640; padding-bottom: 20px; }
+h1, h2, h3, p { margin-top: 0; } h1 { font-size: clamp(1.6rem, 4vw, 2.5rem); margin-bottom: 0; } h2 { margin-bottom: 4px; font-size: 1.5rem; } h3 { margin-bottom: 6px; }
+.eyebrow { color: #bca7ff; font-size: .72rem; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; margin-bottom: 8px; }
+.muted { color: #9ca0ad; } .small { font-size: .85rem; } .danger { color: #ff8f9b; }
+.health { color: #bdc0ca; display: flex; align-items: center; gap: 8px; } .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; } .dot.good { background: #5ee39a; } .dot.bad { background: #ff6f7f; }
+.tabs { display: flex; flex-wrap: wrap; gap: 6px; padding: 18px 0; } .tab { background: transparent; color: #a9acb8; border: 0; border-bottom: 2px solid transparent; padding: 8px 12px; } .tab.active { color: #fff; border-bottom-color: #bca7ff; }
+.content { display: grid; gap: 18px; } .card { background: rgba(27, 29, 36, .9); border: 1px solid #343640; border-radius: 14px; padding: 20px; box-shadow: 0 8px 30px rgba(0,0,0,.16); }
+.hero { min-height: 190px; display: flex; justify-content: space-between; align-items: end; gap: 20px; } .hero h2 { font-size: clamp(1.8rem, 5vw, 3.6rem); max-width: 800px; }
+.controls, .row-actions { display: flex; gap: 8px; flex-wrap: wrap; } .primary, .secondary { border-radius: 8px; padding: 9px 13px; border: 1px solid #6b5ccf; } .primary { background: #bca7ff; color: #1a1625; font-weight: 700; } .secondary { background: transparent; color: #e9e4ff; border-color: #5c6071; } button:disabled { cursor: not-allowed; opacity: .45; }
+.grid { display: grid; gap: 18px; } .three { grid-template-columns: repeat(3, 1fr); } .info strong { font-size: 1.6rem; } .two-col > div { flex: 1; }
+.alert { padding: 11px 14px; border-radius: 8px; margin-bottom: 16px; } .alert.error { background: #3a1e29; border: 1px solid #8f4158; } .alert.success { background: #183b2b; border: 1px solid #3f9669; display: flex; justify-content: space-between; } .alert button { background: transparent; border: 0; color: inherit; }
+.calendar { overflow: auto; } .active-event { background: #6d5ac8 !important; border-color: #bca7ff !important; } .suppressed-event { background: #545766 !important; opacity: .7; }
+.form { display: grid; gap: 16px; } .form-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; } label { display: grid; gap: 6px; color: #cdd0da; font-size: .9rem; } input, select { width: 100%; border-radius: 8px; border: 1px solid #4b4e5e; background: #12141a; color: #fff; padding: 10px; } input:focus, select:focus { outline: 2px solid #bca7ff; outline-offset: 1px; }
+.weekday-fieldset { border: 1px solid #404351; border-radius: 10px; padding: 12px; } .weekday-fieldset legend { color: #cdd0da; padding: 0 5px; } .weekday-options, .form-actions { display: flex; flex-wrap: wrap; gap: 9px; } .check-label { display: flex; align-items: center; gap: 5px; border: 1px solid #4b4e5e; border-radius: 8px; padding: 7px 9px; } .check-label input { width: auto; } .danger-button { border-color: #8f4158; color: #ffb1ba; }
+.inline-form { display: flex; gap: 10px; } .inline-form input { flex: 1; } .list { display: grid; gap: 12px; } .pill { border: 1px solid #5c6071; color: #c4c7d1; border-radius: 99px; padding: 4px 8px; font-size: .75rem; } .pill.good { color: #5ee39a; border-color: #3f9669; background: transparent; } .audit-row time { white-space: nowrap; }
+@media (max-width: 720px) { .shell { padding: 14px; } .hero, .section-heading, .row, .audit-row, .two-col, .inline-form { align-items: stretch; flex-direction: column; } .three, .form-grid { grid-template-columns: 1fr; } .controls { width: 100%; } .controls button { flex: 1; } }

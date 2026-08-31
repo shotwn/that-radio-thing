@@ -1,0 +1,46 @@
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+extend-exclude = ["admin/node_modules", "admin/dist", "static/admin"]
+
+[tool.ruff.lint]
+select = [
+  "A",
+  "ASYNC",
+  "B",
+  "BLE",
+  "C4",
+  "D",
+  "DTZ",
+  "E4",
+  "E7",
+  "E9",
+  "F",
+  "I",
+  "PIE",
+  "RSE",
+  "RUF",
+  "S",
+  "SIM",
+  "UP",
+]
+ignore = [
+  "ASYNC240", # Tiny pathlib metadata calls are appropriate in aiohttp handlers.
+  "D202",     # A blank line after docstrings improves this project's readability.
+  "D203",     # Use the standard no-blank-line-before-class convention.
+  "D213",     # Multi-line summaries start on the opening line.
+  "D401",     # Handler docstrings read better as descriptive statements.
+  "E501",     # Ruff format handles code; long URLs/messages remain readable.
+  "PERF203",  # Per-item exception isolation is intentional in resilient loops.
+  "RSE102",   # Parenthesized raises keep multiline aiohttp responses readable.
+]
+
+[tool.ruff.lint.per-file-ignores]
+"thatradiothing/db.py" = ["S608"] # SQL fragments only contain internal allowlisted columns.
+"tests/**/*.py" = ["S101", "S105", "S106"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"
+docstring-code-format = true

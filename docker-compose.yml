@@ -11,3 +11,5 @@ services:
       # Persist rotating log files on the host so they survive rebuilds
       # and can be tailed directly (./logs/thatradiothing.log).
       - ./logs:/app/logs
+      # SQLite database and WAL files must survive image/container changes.
+      - ./data:/app/data

@@ -1,17 +1,26 @@
-import json
+"""Represent one Spotify listener and wrap their Web API operations."""
+
+import asyncio
+import datetime
 import re
 import time
-import aiohttp
-import datetime
-import thatradiothing.exceptions as exceptions
-from logzero import logger
 from pprint import pformat
+from urllib.parse import urlparse
+
+import aiohttp
+from logzero import logger
+
+import thatradiothing.exceptions as exceptions
 
 
 class User:
+    """Store listener session state and perform authenticated Spotify calls."""
+
     def __init__(self, trt, session_id, redirect_uri, client_id, client_secret):
+        """Initialize OAuth, device, playback, and transient UI state."""
+
         self.trt = trt
-        self.api = 'https://api.spotify.com'
+        self.api = "https://api.spotify.com"
         self.session_id = session_id
         self.redirect_uri = redirect_uri
         self.client_id = client_id
@@ -23,22 +32,18 @@ class User:
         self.expires_in = None
         self.refresh_token = None
         self.last_refresh = None
-        self.refresh_tokens_after = float('inf')
+        self.refresh_tokens_after = float("inf")
         self._aiohttp_session = None
+        self._token_refresh_lock = asyncio.Lock()
         self._selected_device = None
         self.play_if_paused = True  # Disregard user's pause state and start playback.
         self.enabled = True
         self.paused_cycles = 0
 
         self.spotify_profile = None
-        self.message = ''
+        self.message = ""
 
         self.pass_sync_for_cycles = 0
-        self.currently_playing_cache = {
-            'cached_at': None,
-            'cached_data': None,
-            'cached_params': None  # TODO: Cache currently playing, especially for master user.
-        }
 
         self._devices_cache = None
         self._devices_cache_expires_at = 0.0
@@ -70,6 +75,8 @@ class User:
     IDLE_MESSAGE_RESET_SECONDS = 30 * 60
 
     def touch_interaction(self):
+        """Record activity so idle-state cleanup does not clear fresh feedback."""
+
         self.last_interaction_at = time.time()
 
     def set_transient_message(self, text, ttl_seconds=10):
@@ -82,11 +89,15 @@ class User:
         self.message_expires_at = time.time() + ttl_seconds
 
     def expire_message_if_due(self):
+        """Clear the listener message after its optional expiry time."""
+
         if self.message_expires_at and time.time() >= self.message_expires_at:
-            self.message = ''
+            self.message = ""
             self.message_expires_at = 0.0
 
     def is_idle_disabled(self):
+        """Return whether this disabled listener has been inactive long enough."""
+
         return (
             not self.enabled
             and not self.is_waiting_for_device()
@@ -94,32 +105,42 @@ class User:
         )
 
     def is_waiting_for_device(self):
+        """Return whether the short device-discovery grace period is active."""
+
         return time.time() < self.waiting_for_device_until
 
     def begin_waiting_for_device(self):
+        """Start device discovery and invalidate the cached device list."""
+
         self.waiting_for_device_until = time.time() + self.WAITING_FOR_DEVICE_WINDOW_SECONDS
         # Invalidate the cache so the next list_devices call hits Spotify.
         self._devices_cache = None
         self._devices_cache_expires_at = 0.0
 
     def end_waiting_for_device(self):
+        """End the device-discovery grace period."""
+
         self.waiting_for_device_until = 0.0
 
     async def aiohttp_session(self):
+        """Return this listener's reusable, bounded HTTP client session."""
+
         if not self._aiohttp_session:
-            self._aiohttp_session = aiohttp.ClientSession()
+            self._aiohttp_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15))
 
         return self._aiohttp_session
 
     async def request_tokens(self):
-        tokens_url = 'https://accounts.spotify.com/api/token'
+        """Exchange the OAuth authorization code and load the Spotify profile."""
+
+        tokens_url = "https://accounts.spotify.com/api/token"
         logger.info(self.redirect_uri)
         payload = {
-            "grant_type": 'authorization_code',
+            "grant_type": "authorization_code",
             "code": self.auth_code,
             "redirect_uri": self.redirect_uri,
             "client_id": self.client_id,
-            "client_secret": self.client_secret
+            "client_secret": self.client_secret,
         }
         session = await self.aiohttp_session()
         async with session.post(tokens_url, data=payload) as response:
@@ -129,8 +150,8 @@ class User:
 
             data = await response.json(content_type=None)
 
-            if data.get('error', False):
-                logger.error(data['error'])
+            if data.get("error", False):
+                logger.error(data["error"])
                 logger.error(pformat(data))
                 return False
 
@@ -140,19 +161,21 @@ class User:
             self.expires_in = int(data["expires_in"])
             self.refresh_tokens_after = time.time() + self.expires_in - 60
             self.refresh_token = data["refresh_token"]
-            self.last_refresh = datetime.datetime.now()
+            self.last_refresh = datetime.datetime.now(datetime.UTC)
 
             await self.users_profile()
             # logger.info(pformat(vars(self)))
             return True
 
     async def refresh_tokens(self):
-        tokens_url = 'https://accounts.spotify.com/api/token'
+        """Refresh the Spotify access token using this listener's refresh token."""
+
+        tokens_url = "https://accounts.spotify.com/api/token"
         payload = {
             "grant_type": "refresh_token",
             "refresh_token": self.refresh_token,
             "client_id": self.client_id,
-            "client_secret": self.client_secret
+            "client_secret": self.client_secret,
         }
         session = await self.aiohttp_session()
         async with session.post(tokens_url, data=payload) as response:
@@ -162,28 +185,34 @@ class User:
 
             data = await response.json(content_type=None)
 
-            if data.get('error', False):
-                logger.error(data['error'])
+            if data.get("error", False):
+                logger.error(data["error"])
                 logger.error(pformat(data))
                 return False
 
             self.access_token = data["access_token"]
             self.expires_in = int(data["expires_in"])
             self.refresh_tokens_after = time.time() + self.expires_in - 60
-            self.scope = data["scope"]
-            self.token_type = data["token_type"]
+            self.scope = data.get("scope", self.scope)
+            self.token_type = data.get("token_type", self.token_type or "Bearer")
+            if data.get("refresh_token"):
+                self.refresh_token = data["refresh_token"]
             return True
 
     async def auth_headers(self):
+        """Return a fresh authorization header or disable an invalid session."""
+
         if time.time() > self.refresh_tokens_after:
-            if not await self.refresh_tokens():
-                logger.error("Auth failed for user: ")
-                logger.error(self)
-                self.enabled = False
-                return None
+            # Multiple status/playback calls can discover expiry together. Only
+            # one may exchange the refresh token; followers reuse its result.
+            async with self._token_refresh_lock:
+                if time.time() > self.refresh_tokens_after and not await self.refresh_tokens():
+                    logger.error("Spotify authentication refresh failed")
+                    self.enabled = False
+                    return None
         if not self.access_token:
             return None
-        return {'Authorization': 'Bearer ' + self.access_token}
+        return {"Authorization": "Bearer " + self.access_token}
 
     async def force_refresh_on_unauthorized(self):
         """Force a token refresh in response to a 401 from Spotify.
@@ -194,29 +223,32 @@ class User:
         401. One forced refresh + retry keeps the sync loop from breaking.
         Returns True if a fresh access token is now in place.
         """
-        refreshed = await self.refresh_tokens()
+        async with self._token_refresh_lock:
+            refreshed = await self.refresh_tokens()
         if not refreshed:
             return False
         return bool(self.access_token)
 
     async def play(self, uris=None, position_ms=None):
-        play_url = self.api + '/v1/me/player/play'
+        """Start the supplied tracks on the selected device and position."""
+
+        play_url = self.api + "/v1/me/player/play"
         selected_device = await self.selected_device()
         if not selected_device:
-            return
+            return False
 
-        play_url += '?device_id=' + selected_device
-
-        payload = {
-            'uris': uris,
-            'position_ms': position_ms if position_ms else 0
-        }
+        payload = {"uris": uris, "position_ms": position_ms if position_ms else 0}
         session = await self.aiohttp_session()
         for attempt in range(2):
             headers = await self.auth_headers()
             if headers is None:
                 return False
-            async with session.put(play_url, json=payload, headers=headers) as response:
+            async with session.put(
+                play_url,
+                params={"device_id": selected_device},
+                json=payload,
+                headers=headers,
+            ) as response:
                 if response.status == 401 and attempt == 0:
                     if not await self.force_refresh_on_unauthorized():
                         raise exceptions.OtherError(await response.text())
@@ -230,40 +262,44 @@ class User:
                 return True
 
     async def seek(self, position_ms):
-        seek_url = self.api + '/v1/me/player/seek'
+        """Seek the current listener device to *position_ms*."""
+
+        seek_url = self.api + "/v1/me/player/seek"
         session = await self.aiohttp_session()
         for attempt in range(2):
             headers = await self.auth_headers()
             if headers is None:
                 return False
-            async with session.put(seek_url + f'?position_ms={position_ms}', headers=headers) as response:
+            async with session.put(
+                seek_url, params={"position_ms": position_ms}, headers=headers
+            ) as response:
                 if response.status == 401 and attempt == 0:
                     if not await self.force_refresh_on_unauthorized():
                         return False
                     continue
-                if response.status != 204:
-                    return False
-                return True
+                return response.status == 204
 
     async def queue(self, uri):
-        queue_url = self.api + f'/v1/me/player/queue?uri={uri}'
+        """Append *uri* to the listener's Spotify playback queue."""
+
+        queue_url = self.api + "/v1/me/player/queue"
 
         session = await self.aiohttp_session()
         for attempt in range(2):
             headers = await self.auth_headers()
             if headers is None:
                 return False
-            async with session.post(queue_url, headers=headers) as response:
+            async with session.post(queue_url, params={"uri": uri}, headers=headers) as response:
                 if response.status == 401 and attempt == 0:
                     if not await self.force_refresh_on_unauthorized():
                         return False
                     continue
-                if response.status != 204:
-                    return False
-                return True
+                return response.status == 204
 
     async def currently_playing(self, raise_exception=False, get_next_from_context=False):
-        currently_playing_url = self.api + '/v1/me/player/currently-playing'
+        """Return current playback, optionally raising user-level empty states."""
+
+        currently_playing_url = self.api + "/v1/me/player/currently-playing"
         session = await self.aiohttp_session()
         response = None
         for attempt in range(2):
@@ -278,52 +314,62 @@ class User:
                 response = resp
                 if response.status == 204:
                     if raise_exception:
-                        raise exceptions.NoContent('Nothing is playing')
+                        raise exceptions.NoContent("Nothing is playing")
                     return None
 
                 data = await response.json(content_type=None)
-                if (not data or not isinstance(data, dict)) and raise_exception:
-                    raise exceptions.NoActiveDevice()
+                if not data or not isinstance(data, dict):
+                    if raise_exception:
+                        raise exceptions.NoActiveDevice()
+                    return None
 
-                if raise_exception:
-                    if not data.get('is_playing'):
-                        raise exceptions.PlaybackPaused()
+                if raise_exception and not data.get("is_playing"):
+                    raise exceptions.PlaybackPaused()
 
-                if get_next_from_context and data and 'context' in data:
-                    next_track = await self.next_from_context(data['context'], data['item'])
-                    data['next_track'] = next_track
+                if get_next_from_context and data and "context" in data:
+                    next_track = await self.next_from_context(data["context"], data["item"])
+                    data["next_track"] = next_track
                 return data
 
     async def next_from_context(self, context, current_track):
-        if not context or 'type' not in context:
+        """Find the track after *current_track* in a supported playback context."""
+
+        if not context or "type" not in context:
             return None
 
-        if context['type'] == 'playlist':
-            playlist = await self.get_playlist(context['uri'])
-            if not playlist or not playlist.get('tracks') or not playlist['tracks'].get('items'):
+        if context["type"] == "playlist":
+            playlist = await self.get_playlist(context["uri"])
+            if not playlist or not playlist.get("tracks") or not playlist["tracks"].get("items"):
                 return None
 
-            next_track = await self.get_next_track(playlist['tracks']['items'], current_track)
-            return next_track
+            return await self.get_next_track(playlist["tracks"]["items"], current_track)
+
+        return None
 
     async def get_next_track(self, collection, current_track):
+        """Return the item immediately following *current_track* in *collection*."""
+
         grab_next = False
         for item in collection:
             if grab_next:
-                return item['track']
-            if item['track']['uri'] == current_track['uri']:
+                return item["track"]
+            if item["track"]["uri"] == current_track["uri"]:
                 grab_next = True
 
         return None
 
     async def get_playlist(self, uri):
-        playlist_id_r = r'playlist:(.*)'
+        """Fetch and normalize the Spotify playlist identified by *uri*."""
+
+        playlist_id_r = r"playlist:(.*)"
         match = re.search(playlist_id_r, uri)
         if not match:
             return None
         playlist_id = match.group(1)
-        playlist_url = self.api + f'/v1/playlists/{playlist_id}'
+        playlist_url = self.api + f"/v1/playlists/{playlist_id}"
         headers = await self.auth_headers()
+        if headers is None:
+            return None
         session = await self.aiohttp_session()
         async with session.get(playlist_url, headers=headers) as response:
             if response.status != 200:
@@ -331,9 +377,54 @@ class User:
 
             playlist = await response.json(content_type=None)
 
+            # Spotify's current playlist contract exposes contents as
+            # ``items.items[].item``; older releases returned
+            # ``tracks.items[].track``. Normalize the new shape to the
+            # legacy structure used by the master next-track helper.
+            if not isinstance(playlist.get("tracks"), dict) and isinstance(
+                playlist.get("items"), dict
+            ):
+                current_items = playlist.pop("items")
+                playlist["tracks"] = {
+                    "items": [
+                        {"track": item.get("item") or item.get("track")}
+                        for item in current_items.get("items", [])
+                        if isinstance(item, dict)
+                        and isinstance(item.get("item") or item.get("track"), dict)
+                    ],
+                    "next": current_items.get("next"),
+                }
+
+            # If metadata did not include item contents, fetch the dedicated
+            # current endpoint. The fallback keeps old public-playlist
+            # behavior working for grandfathered Spotify applications.
+            tracks_payload = (
+                playlist.get("tracks") if isinstance(playlist.get("tracks"), dict) else {}
+            )
+            if not tracks_payload.get("items"):
+                items_url = self.api + f"/v1/playlists/{playlist_id}/items"
+                async with session.get(
+                    items_url, headers=headers, params={"limit": 50}
+                ) as items_response:
+                    if items_response.status == 200:
+                        current_items = await items_response.json(content_type=None)
+                        if isinstance(current_items, dict):
+                            playlist["tracks"] = {
+                                "items": [
+                                    {"track": item.get("item") or item.get("track")}
+                                    for item in current_items.get("items", [])
+                                    if isinstance(item, dict)
+                                    and isinstance(item.get("item") or item.get("track"), dict)
+                                ],
+                                "next": current_items.get("next"),
+                            }
+
             if playlist["tracks"]["next"]:
-                more_tracks = await self.get_more_playlist_tracks(playlist["tracks"]["next"], session, headers)
-                playlist["tracks"]["items"].extend(more_tracks)
+                more_tracks = await self.get_more_playlist_tracks(
+                    playlist["tracks"]["next"], session, headers
+                )
+                if more_tracks:
+                    playlist["tracks"]["items"].extend(more_tracks)
 
             """
             # print(len(playlist["tracks"]["items"]))
@@ -344,19 +435,53 @@ class User:
             return playlist
 
     async def get_more_playlist_tracks(self, url, session, headers):
-        async with session.get(url, headers=headers) as response:
-            if response.status != 200:
-                return None
+        """Fetch bounded same-origin pagination pages and normalize their items."""
 
-            pagination = await response.json(content_type=None)
-            if pagination["next"]:
-                more_tracks = await self.get_more_playlist_tracks(pagination["next"], session, headers)
-                pagination["items"].extend(more_tracks)
+        items = []
+        next_url = url
+        visited = set()
+        for _page_number in range(500):
+            if not self._is_spotify_api_url(next_url) or next_url in visited:
+                logger.error("Rejected unsafe or cyclic Spotify pagination URL")
+                return items or None
+            visited.add(next_url)
+            async with session.get(next_url, headers=headers) as response:
+                if response.status != 200:
+                    return items or None
+                pagination = await response.json(content_type=None)
+            if not isinstance(pagination, dict):
+                return items or None
+            items.extend(
+                {"track": item.get("item") or item.get("track")}
+                for item in pagination.get("items", [])
+                if isinstance(item, dict)
+                and isinstance(item.get("item") or item.get("track"), dict)
+            )
+            next_url = pagination.get("next")
+            if not next_url:
+                return items
+        logger.error("Spotify playlist pagination exceeded 500 pages")
+        return items
 
-            return pagination["items"]
+    @staticmethod
+    def _is_spotify_api_url(url):
+        """Return whether *url* is a safe HTTPS Spotify Web API endpoint."""
+
+        if not isinstance(url, str):
+            return False
+        parsed = urlparse(url)
+        return (
+            parsed.scheme == "https"
+            and parsed.hostname == "api.spotify.com"
+            and parsed.path.startswith("/v1/")
+            and parsed.username is None
+            and parsed.password is None
+        )
 
     async def pause(self):
-        pause_url = self.api + '/v1/me/player/pause'
+        """Pause playback on the listener's active Spotify device."""
+
+        pause_url = self.api + "/v1/me/player/pause"
         session = await self.aiohttp_session()
         for attempt in range(2):
             headers = await self.auth_headers()
@@ -367,9 +492,7 @@ class User:
                     if not await self.force_refresh_on_unauthorized():
                         return False
                     continue
-                if response.status != 204:
-                    return False
-                return True
+                return response.status == 204
 
     async def list_devices(self):
         """Return the Spotify devices payload, always shaped ``{"devices": [...]}``.
@@ -382,10 +505,12 @@ class User:
         if self._devices_cache is not None and now < self._devices_cache_expires_at:
             cached = self._devices_cache
             for device in cached.get("devices", []):
-                device["selected_device"] = (str(device['id']) == str(self._selected_device if self._selected_device else ' NONE '))
+                device["selected_device"] = str(device["id"]) == str(
+                    self._selected_device if self._selected_device else " NONE "
+                )
             return cached
 
-        devices_url = self.api + '/v1/me/player/devices'
+        devices_url = self.api + "/v1/me/player/devices"
         headers = await self.auth_headers()
         session = await self.aiohttp_session()
 
@@ -401,7 +526,9 @@ class User:
             body = await response.json(content_type=None)
             device_list = body.get("devices", []) if isinstance(body, dict) else []
             for device in device_list:
-                device["selected_device"] = (str(device['id']) == str(self._selected_device if self._selected_device else ' NONE '))
+                device["selected_device"] = str(device["id"]) == str(
+                    self._selected_device if self._selected_device else " NONE "
+                )
 
             normalized = {"devices": device_list}
             if device_list:
@@ -415,19 +542,21 @@ class User:
             return normalized
 
     async def select_device(self, dev_id, first_one=False):
+        """Select a matching device, or the first device when requested."""
+
         devices = await self.list_devices()
         currently_playing = await self.currently_playing()
         for device in devices["devices"]:
-            if str(device['id']) == str(dev_id) or first_one:
-                self._selected_device = device['id']
+            if str(device["id"]) == str(dev_id) or first_one:
+                self._selected_device = device["id"]
                 if currently_playing:
-                    await self.transfer_playback(str(device['id']))
+                    await self.transfer_playback(str(device["id"]))
                 return device
-        else:
-            return False
         return False
 
     async def selected_device(self):
+        """Return the selected device, choosing the first available if needed."""
+
         if self._selected_device:
             return self._selected_device
 
@@ -439,34 +568,39 @@ class User:
         return False
 
     async def users_profile(self):
-        user_profile_url = self.api + '/v1/me'
+        """Load the listener's Spotify profile and master eligibility."""
+
+        user_profile_url = self.api + "/v1/me"
 
         headers = await self.auth_headers()
+        if headers is None:
+            return False
         session = await self.aiohttp_session()
         async with session.get(user_profile_url, headers=headers) as response:
             if response.status != 200:
                 return False
 
             self.spotify_profile = await response.json(content_type=None)
-            self.spotify_profile['can_be_master'] = False
-            if self.spotify_profile['id'] in self.trt.masters_list:
-                self.spotify_profile['can_be_master'] = True
+            self.spotify_profile["can_be_master"] = False
+            if self.spotify_profile["id"] in self.trt.masters_list:
+                self.spotify_profile["can_be_master"] = True
 
             return self.spotify_profile
 
     async def transfer_playback(self, dev_id, play=True):
-        transfer_playback_url = self.api + '/v1/me/player'
+        """Transfer playback to *dev_id* and optionally begin playing."""
+
+        transfer_playback_url = self.api + "/v1/me/player"
 
         headers = await self.auth_headers()
+        if headers is None:
+            return False
         session = await self.aiohttp_session()
-        payload = {
-            'device_ids': [dev_id],
-            'play': play
-        }
+        payload = {"device_ids": [dev_id], "play": play}
 
-        async with session.put(transfer_playback_url, data=json.dumps(payload), headers=headers) as response:
+        async with session.put(transfer_playback_url, json=payload, headers=headers) as response:
             if response.status != 204:
-                logger.debug('TRANSFER FAIL')
+                logger.debug("TRANSFER FAIL")
                 logger.debug(pformat(response))
                 logger.debug(pformat(await response.text()))
                 return False
@@ -474,12 +608,14 @@ class User:
             return True
 
     async def summary(self):
+        """Return the listener fields exposed to an authorized master."""
+
         return {
-            'session_id': str(self.session_id),
-            'selected_device': self._selected_device,
-            'play_if_paused': self.play_if_paused,
-            'enabled': self.enabled,
-            'paused_cycles': self.paused_cycles,
-            'spotify_profile': self.spotify_profile,
-            'pass_sync_for_cycles': self.pass_sync_for_cycles
+            "session_id": str(self.session_id),
+            "selected_device": self._selected_device,
+            "play_if_paused": self.play_if_paused,
+            "enabled": self.enabled,
+            "paused_cycles": self.paused_cycles,
+            "spotify_profile": self.spotify_profile,
+            "pass_sync_for_cycles": self.pass_sync_for_cycles,
         }

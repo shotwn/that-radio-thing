@@ -1,9 +1,17 @@
 .env
 config.json
 __pycache__
+.DS_Store
+.ruff_cache/
+.pytest_cache/
+.coverage
 env
 logo.png
 logs/
 *.log
 *.log.*
 .claude/settings.local.json
+admin/node_modules/
+admin/dist/
+data/
+static/admin/

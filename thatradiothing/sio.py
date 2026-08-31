@@ -15,7 +15,7 @@ Design
 * A background task (:meth:`SocketIOGateway.push_loop`) ticks once per second.
   For each connected socket it rebuilds the per-user status payload and emits
   ``status`` only if the payload differs from what the client last received.
-  This turns N-clients × poll-rate load into N-clients × change-rate load.
+  This turns N-clients x poll-rate load into N-clients x change-rate load.
 * Stale authentication on long-lived sockets is handled defensively: every
   tick we call ``user.auth_headers()`` (which refreshes Spotify tokens as
   needed). If that fails we disconnect the socket so the client reconnects
@@ -28,8 +28,8 @@ import time
 import socketio
 from logzero import logger
 
-
-STATUS_EVENT = 'status'
+STATUS_EVENT = "status"
+ADMIN_STATUS_EVENT = "admin_status"
 
 # How often the push loop wakes to look at per-socket state. Kept at 1 s
 # so real state changes (track flip, master change, device list, enable
@@ -67,7 +67,7 @@ class SocketIOGateway:
 
         cors_origins = self._resolve_cors_origins()
         self.sio = socketio.AsyncServer(
-            async_mode='aiohttp',
+            async_mode="aiohttp",
             cors_allowed_origins=cors_origins,
             cors_credentials=bool(self.trt.cors_allow_credentials),
         )
@@ -82,8 +82,8 @@ class SocketIOGateway:
         pass it through verbatim; otherwise fall back to ``'*'``.
         """
         configured = list(self.trt.cors_allowed_origins)
-        if '*' in configured:
-            return '*'
+        if "*" in configured:
+            return "*"
         return configured
 
     async def start(self):
@@ -94,18 +94,20 @@ class SocketIOGateway:
     # --- handlers ---------------------------------------------------------
 
     def _register_handlers(self):
+        """Register authenticated connect and disconnect event callbacks."""
+
         sio = self.sio
 
         @sio.event
         async def connect(sid, environ, auth):
             """Authenticate the socket via the HTTP cookie on the handshake."""
-            request = environ.get('aiohttp.request')
+            request = environ.get("aiohttp.request")
             if request is None:
                 return False
 
             try:
                 user = await self.web_server.logged_in_user(request)
-            except Exception:
+            except Exception:  # noqa: BLE001 - handshake boundary rejects safely
                 logger.exception("socket.io connect auth failed")
                 return False
             if not user:
@@ -114,19 +116,31 @@ class SocketIOGateway:
             # Store only the user's session_id; we re-resolve the User
             # object each tick so a logged-out/removed user is caught.
             async with sio.session(sid) as session:
-                session['session_id'] = str(user.session_id)
+                session["session_id"] = str(user.session_id)
+                session["is_admin"] = bool(
+                    user.spotify_profile
+                    and str(user.spotify_profile.get("id")) in set(self.trt.admin_ids)
+                )
 
             # Send an initial snapshot so the client doesn't wait a tick.
             try:
-                payload = await self.web_server.build_status_payload(user)
+                async with sio.session(sid) as session:
+                    is_admin = bool(session.get("is_admin"))
+                payload = (
+                    await self.web_server.admin_api.status_payload()
+                    if is_admin
+                    else await self.web_server.build_status_payload(user)
+                )
                 self._last_payloads[sid] = payload
                 self._last_emit_monotonic[sid] = time.monotonic()
-                await sio.emit(STATUS_EVENT, payload, to=sid)
-            except Exception:
+                await sio.emit(ADMIN_STATUS_EVENT if is_admin else STATUS_EVENT, payload, to=sid)
+            except Exception:  # noqa: BLE001 - connection survives emit failures
                 logger.exception("initial status emit failed")
 
         @sio.event
         async def disconnect(sid):
+            """Discard cached status when a socket disconnects."""
+
             self._last_payloads.pop(sid, None)
             self._last_emit_monotonic.pop(sid, None)
 
@@ -137,19 +151,24 @@ class SocketIOGateway:
         while True:
             try:
                 await self._tick()
-            except Exception:
+            except Exception:  # noqa: BLE001 - background loop must stay alive
                 logger.exception("status push loop error")
             await asyncio.sleep(PUSH_INTERVAL_SECONDS)
 
     async def _tick(self):
+        """Emit one status update to every currently tracked socket."""
+
         # Snapshot sids so mutation during iteration is safe.
         for sid in list(self._last_payloads.keys()):
             await self._emit_for_sid(sid)
 
     async def _emit_for_sid(self, sid):
+        """Authenticate and conditionally emit the latest state to one socket."""
+
         try:
             async with self.sio.session(sid) as session:
-                session_id = session.get('session_id')
+                session_id = session.get("session_id")
+                is_admin = bool(session.get("is_admin"))
         except KeyError:
             # Socket already gone; drop the last-payload slot.
             self._last_payloads.pop(sid, None)
@@ -168,9 +187,15 @@ class SocketIOGateway:
             await self._drop(sid)
             return
 
-        payload = await self.web_server.build_status_payload(user)
+        payload = (
+            await self.web_server.admin_api.status_payload()
+            if is_admin
+            else await self.web_server.build_status_payload(user)
+        )
         last_payload = self._last_payloads.get(sid)
-        content_changed = last_payload is None or self._diff_key(payload) != self._diff_key(last_payload)
+        content_changed = last_payload is None or self._diff_key(payload) != self._diff_key(
+            last_payload
+        )
 
         now = time.monotonic()
         last_emit = self._last_emit_monotonic.get(sid, 0.0)
@@ -179,7 +204,7 @@ class SocketIOGateway:
         if content_changed or heartbeat_due:
             self._last_payloads[sid] = payload
             self._last_emit_monotonic[sid] = now
-            await self.sio.emit(STATUS_EVENT, payload, to=sid)
+            await self.sio.emit(ADMIN_STATUS_EVENT if is_admin else STATUS_EVENT, payload, to=sid)
 
     def _diff_key(self, payload):
         """Return a payload view that ignores the per-second progress tick.
@@ -194,13 +219,15 @@ class SocketIOGateway:
         """
         if not isinstance(payload, dict):
             return payload
-        master = payload.get('master_user')
-        if isinstance(master, dict) and 'progress_ms' in master:
-            masked_master = {**master, 'progress_ms': None}
-            return {**payload, 'master_user': masked_master}
+        master = payload.get("master_user")
+        if isinstance(master, dict) and "progress_ms" in master:
+            masked_master = {**master, "progress_ms": None}
+            return {**payload, "master_user": masked_master}
         return payload
 
     async def _drop(self, sid):
+        """Disconnect *sid* and remove all cached state associated with it."""
+
         await self.sio.disconnect(sid)
         self._last_payloads.pop(sid, None)
         self._last_emit_monotonic.pop(sid, None)

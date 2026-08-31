@@ -9,16 +9,18 @@ class's :meth:`WebServer.logged_in_user` and :meth:`WebServer.build_status_paylo
 so the wire format and auth rules stay consistent across both transports.
 """
 
+import json
+import secrets
+import time
+import uuid
+from urllib.parse import urlencode, urlparse
+
 from aiohttp import web
 
-import uuid
-import json
-import time
-from urllib.parse import urlparse
-
-from thatradiothing.logger import debug
 import thatradiothing.user
+from thatradiothing.admin_api import AdminAPI
 from thatradiothing.jwt_auth import issue_auth_token, verify_auth_token
+from thatradiothing.logger import debug
 from thatradiothing.sio import SocketIOGateway
 
 
@@ -33,6 +35,8 @@ class WebServer(web.Application):
     """
 
     def __init__(self, thatradiothing, **kwargs):
+        """Configure middleware, routes, Socket.IO, and admin services."""
+
         super().__init__(**kwargs)
 
         self.trt = thatradiothing
@@ -45,43 +49,48 @@ class WebServer(web.Application):
 
         # Socket.IO: real-time status push. All wiring lives in the gateway.
         self.sio_gateway = SocketIOGateway(self)
+        self.admin_api = AdminAPI(self)
+        self.admin_api.register()
 
     # ------------------------------------------------------------------
     # Route registration
     # ------------------------------------------------------------------
 
     def _register_routes(self):
-        self.router.add_route('*', '/', self.index)
-        self.add_routes([
-            web.get('/player', self.player),
-            web.get('/logo', self.logo),
-            web.get('/exit', self.exit),
-            web.get('/auth', self.auth),
-            web.get('/auth_return', self.auth_return),
-            web.get('/logout', self.logout),
-            web.get('/successful_auth', self.successful_auth),
-            web.get('/devices', self.devices),
-            web.post('/devices', self.set_active_device),
-            web.get('/master', self.set_master_user),
-            web.get('/resign', self.resign_master_user),
-            web.get('/profile', self.profile),
-            web.get('/enable', self.enable),
-            web.get('/disable', self.disable),
-            # DEPRECATED: prefer the Socket.IO ``status`` event (see
-            # ``sio.py``). The push channel emits the same payload on
-            # state change and on connect, so polling this REST endpoint
-            # is no longer necessary. Kept around only as a fallback for
-            # transports that cannot speak Socket.IO. Will be removed
-            # once no client polls it.
-            web.get('/status', self.status),
-            web.get('/api/now_playing', self.now_playing),
-            web.get('/users', self.users),
-        ])
+        self.router.add_route("*", "/", self.index)
+        self.add_routes(
+            [
+                web.get("/player", self.player),
+                web.get("/logo", self.logo),
+                web.get("/auth", self.auth),
+                web.get("/auth_return", self.auth_return),
+                web.post("/logout", self.logout),
+                web.get("/successful_auth", self.successful_auth),
+                web.get("/devices", self.devices),
+                web.post("/devices", self.set_active_device),
+                web.post("/master", self.set_master_user),
+                web.post("/resign", self.resign_master_user),
+                web.get("/profile", self.profile),
+                web.post("/enable", self.enable),
+                web.post("/disable", self.disable),
+                # DEPRECATED: prefer the Socket.IO ``status`` event (see
+                # ``sio.py``). The push channel emits the same payload on
+                # state change and on connect, so polling this REST endpoint
+                # is no longer necessary. Kept around only as a fallback for
+                # transports that cannot speak Socket.IO. Will be removed
+                # once no client polls it.
+                web.get("/status", self.status),
+                web.get("/api/now_playing", self.now_playing),
+                web.get("/users", self.users),
+                web.get("/health/live", self.health_live),
+                web.get("/health/ready", self.health_ready),
+            ]
+        )
 
     def _build_cors_middleware(self):
         @web.middleware
         async def cors_middleware(request, handler):
-            if request.method == 'OPTIONS':
+            if request.method == "OPTIONS":
                 response = web.Response(status=204)
                 return self._apply_cors_headers(request, response)
 
@@ -95,8 +104,7 @@ class WebServer(web.Application):
         return cors_middleware
 
     def _build_auth_cookie_rotation_middleware(self):
-        """Rotate the auth cookie when in-memory Spotify tokens drift from the
-        ones we loaded from the JWT.
+        """Rotate the auth cookie when its Spotify tokens become stale.
 
         Handlers read tokens via ``user.auth_headers()``, which proactively
         refreshes near-expiry tokens in memory. Without this middleware the
@@ -117,26 +125,28 @@ class WebServer(web.Application):
                 response = ex
 
             try:
-                user = request.get('user')
+                user = request.get("user")
                 if not user:
                     return response
 
                 # Don't fight handlers that set the cookie explicitly.
-                cookies = getattr(response, 'cookies', None)
+                cookies = getattr(response, "cookies", None)
                 if cookies is not None and self.trt.auth_cookie_name in cookies:
                     return response
 
-                loaded_expires_at = request.get('auth_expires_at_on_load')
+                loaded_expires_at = request.get("auth_expires_at_on_load")
                 current_expires_at = None
-                if isinstance(user.refresh_tokens_after, (int, float)) and user.refresh_tokens_after != float('inf'):
+                if isinstance(
+                    user.refresh_tokens_after, (int, float)
+                ) and user.refresh_tokens_after != float("inf"):
                     current_expires_at = int(user.refresh_tokens_after + 60)
 
                 if current_expires_at is None or loaded_expires_at == current_expires_at:
                     return response
 
                 self._set_auth_cookie(response, user)
-            except Exception:  # noqa: BLE001 - never let cookie rotation mask a handler response
-                pass
+            except Exception as exc:  # noqa: BLE001 - response must still be returned
+                debug(f"Auth cookie rotation skipped: {exc}")
 
             return response
 
@@ -155,20 +165,19 @@ class WebServer(web.Application):
         if not trimmed:
             return None
 
-        return trimmed.rstrip('/')
+        return trimmed.rstrip("/")
 
     def _allowed_origin(self, request):
-        request_origin = self._normalize_origin(request.headers.get('Origin'))
+        request_origin = self._normalize_origin(request.headers.get("Origin"))
         if not request_origin:
             return None
 
         allowed_origins = [
-            self._normalize_origin(origin)
-            for origin in self.trt.cors_allowed_origins
+            self._normalize_origin(origin) for origin in self.trt.cors_allowed_origins
         ]
         allowed_origins = [origin for origin in allowed_origins if origin]
 
-        if '*' in allowed_origins:
+        if "*" in allowed_origins:
             return request_origin
 
         if request_origin in allowed_origins:
@@ -181,22 +190,60 @@ class WebServer(web.Application):
         if not allowed_origin:
             return response
 
-        response.headers['Access-Control-Allow-Origin'] = allowed_origin
-        response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
-        response.headers['Access-Control-Allow-Headers'] = 'Authorization, Content-Type'
-        response.headers['Access-Control-Max-Age'] = '600'
+        response.headers["Access-Control-Allow-Origin"] = allowed_origin
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, PATCH, DELETE, OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = (
+            "Authorization, Content-Type, X-CSRF-Token, X-Request-ID"
+        )
+        response.headers["Access-Control-Max-Age"] = "600"
 
-        vary = response.headers.get('Vary')
+        vary = response.headers.get("Vary")
         if vary:
-            if 'Origin' not in vary:
-                response.headers['Vary'] = f'{vary}, Origin'
+            if "Origin" not in vary:
+                response.headers["Vary"] = f"{vary}, Origin"
         else:
-            response.headers['Vary'] = 'Origin'
+            response.headers["Vary"] = "Origin"
 
         if self.trt.cors_allow_credentials:
-            response.headers['Access-Control-Allow-Credentials'] = 'true'
+            response.headers["Access-Control-Allow-Credentials"] = "true"
 
         return response
+
+    def _require_mutation_origin(self, request):
+        """Reject browser mutations from origins outside the first-party set."""
+
+        authorization = request.headers.get("Authorization", "")
+        if authorization.lower().startswith("bearer "):
+            return
+        origin = self._normalize_origin(request.headers.get("Origin"))
+        public = urlparse(self.trt.url)
+        own_origin = (
+            f"{public.scheme}://{public.netloc}" if public.scheme and public.netloc else None
+        )
+        allowed = {
+            normalized
+            for value in [own_origin, *self.trt.cors_allowed_origins]
+            if (normalized := self._normalize_origin(value))
+        }
+        if origin not in allowed:
+            raise web.HTTPForbidden(reason="Mutation Origin is missing or not allowed")
+
+    @staticmethod
+    async def _json_body(request):
+        """Read a small JSON object for legacy listener mutation endpoints."""
+
+        maximum = 64 * 1024
+        if request.content_length and request.content_length > maximum:
+            raise web.HTTPRequestEntityTooLarge(maximum, request.content_length)
+        if request.content_type != "application/json":
+            raise web.HTTPUnsupportedMediaType(reason="Content-Type must be application/json")
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise web.HTTPBadRequest(reason="Request body must be valid JSON") from exc
+        if not isinstance(body, dict):
+            raise web.HTTPBadRequest(reason="Request body must be a JSON object")
+        return body
 
     # ------------------------------------------------------------------
     # Auth cookie + JWT helpers
@@ -214,8 +261,8 @@ class WebServer(web.Application):
             return domain.strip()
 
         host = urlparse(self.trt.url).hostname
-        if host == 'duudey.com' or (isinstance(host, str) and host.endswith('.duudey.com')):
-            return '.duudey.com'
+        if host == "duudey.com" or (isinstance(host, str) and host.endswith(".duudey.com")):
+            return ".duudey.com"
 
         return None
 
@@ -224,33 +271,35 @@ class WebServer(web.Application):
             return
 
         spotify_profile = user.spotify_profile
-        spotify_id = spotify_profile.get('id') if isinstance(spotify_profile, dict) else None
+        spotify_id = spotify_profile.get("id") if isinstance(spotify_profile, dict) else None
         if not spotify_id:
             return
 
         expires_at = None
-        if isinstance(user.refresh_tokens_after, (int, float)) and user.refresh_tokens_after != float('inf'):
+        if isinstance(
+            user.refresh_tokens_after, (int, float)
+        ) and user.refresh_tokens_after != float("inf"):
             expires_at = int(user.refresh_tokens_after + 60)
 
         payload = {
-            'provider': 'spotify',
-            'providerUserId': spotify_id,
-            'displayName': spotify_profile.get('display_name'),
-            'email': spotify_profile.get('email'),
-            'imageUrl': (
-                spotify_profile.get('images', [{}])[0].get('url')
-                if isinstance(spotify_profile.get('images'), list) and spotify_profile.get('images')
+            "provider": "spotify",
+            "providerUserId": spotify_id,
+            "displayName": spotify_profile.get("display_name"),
+            "email": spotify_profile.get("email"),
+            "imageUrl": (
+                spotify_profile.get("images", [{}])[0].get("url")
+                if isinstance(spotify_profile.get("images"), list) and spotify_profile.get("images")
                 else None
             ),
-            'spotifyProfileUrl': (
-                spotify_profile.get('external_urls', {}).get('spotify')
-                if isinstance(spotify_profile.get('external_urls'), dict)
+            "spotifyProfileUrl": (
+                spotify_profile.get("external_urls", {}).get("spotify")
+                if isinstance(spotify_profile.get("external_urls"), dict)
                 else None
             ),
-            'spotifyAccessToken': user.access_token,
-            'spotifyRefreshToken': user.refresh_token,
-            'spotifyExpiresAt': expires_at,
-            'spotifyScope': user.scope,
+            "spotifyAccessToken": user.access_token,
+            "spotifyRefreshToken": user.refresh_token,
+            "spotifyExpiresAt": expires_at,
+            "spotifyScope": user.scope,
         }
 
         token = issue_auth_token(
@@ -261,15 +310,15 @@ class WebServer(web.Application):
         )
 
         cookie_kwargs = {
-            'max_age': self.trt.auth_cookie_max_age_seconds,
-            'httponly': True,
-            'secure': self.trt.auth_cookie_secure,
-            'samesite': self.trt.auth_cookie_samesite,
-            'path': '/',
+            "max_age": self.trt.auth_cookie_max_age_seconds,
+            "httponly": True,
+            "secure": self.trt.auth_cookie_secure,
+            "samesite": self.trt.auth_cookie_samesite,
+            "path": "/",
         }
         domain = self._cookie_domain()
         if domain:
-            cookie_kwargs['domain'] = domain
+            cookie_kwargs["domain"] = domain
 
         response.set_cookie(self.trt.auth_cookie_name, token, **cookie_kwargs)
 
@@ -281,24 +330,24 @@ class WebServer(web.Application):
         # of the JWT cookie so the two cookies route identically and
         # expire together — the only divergence is ``httponly=False``.
         flag_kwargs = dict(cookie_kwargs)
-        flag_kwargs['httponly'] = False
-        response.set_cookie(self.trt.logged_in_cookie_name, '1', **flag_kwargs)
+        flag_kwargs["httponly"] = False
+        response.set_cookie(self.trt.logged_in_cookie_name, "1", **flag_kwargs)
 
     def _clear_auth_cookie(self, response):
         # Clear both cookies in lockstep so the site shell never sees
         # the flag without the JWT (or vice versa).
         domain = self._cookie_domain()
         if domain:
-            response.del_cookie(self.trt.auth_cookie_name, domain=domain, path='/')
-            response.del_cookie(self.trt.logged_in_cookie_name, domain=domain, path='/')
+            response.del_cookie(self.trt.auth_cookie_name, domain=domain, path="/")
+            response.del_cookie(self.trt.logged_in_cookie_name, domain=domain, path="/")
             return
-        response.del_cookie(self.trt.auth_cookie_name, path='/')
-        response.del_cookie(self.trt.logged_in_cookie_name, path='/')
+        response.del_cookie(self.trt.auth_cookie_name, path="/")
+        response.del_cookie(self.trt.logged_in_cookie_name, path="/")
 
     def _extract_auth_token(self, request):
-        auth_header = request.headers.get('Authorization', '')
-        if isinstance(auth_header, str) and auth_header.lower().startswith('bearer '):
-            token = auth_header.split(' ', 1)[1].strip()
+        auth_header = request.headers.get("Authorization", "")
+        if isinstance(auth_header, str) and auth_header.lower().startswith("bearer "):
+            token = auth_header.split(" ", 1)[1].strip()
             if token:
                 return token
 
@@ -312,38 +361,38 @@ class WebServer(web.Application):
         for user in self.trt.users:
             if not user.spotify_profile:
                 continue
-            if str(user.spotify_profile.get('id')) == str(spotify_id):
+            if str(user.spotify_profile.get("id")) == str(spotify_id):
                 return user
         return None
 
     def _apply_claims_to_user(self, user, claims):
-        if claims.get('spotifyAccessToken'):
-            user.access_token = claims.get('spotifyAccessToken')
-        if claims.get('spotifyRefreshToken'):
-            user.refresh_token = claims.get('spotifyRefreshToken')
-        if claims.get('spotifyScope'):
-            user.scope = claims.get('spotifyScope')
+        if claims.get("spotifyAccessToken"):
+            user.access_token = claims.get("spotifyAccessToken")
+        if claims.get("spotifyRefreshToken"):
+            user.refresh_token = claims.get("spotifyRefreshToken")
+        if claims.get("spotifyScope"):
+            user.scope = claims.get("spotifyScope")
 
-        expires_at = claims.get('spotifyExpiresAt')
+        expires_at = claims.get("spotifyExpiresAt")
         if isinstance(expires_at, (int, float)):
             user.refresh_tokens_after = max(float(expires_at) - 60, time.time() + 10)
 
         profile = user.spotify_profile or {}
-        spotify_id = claims.get('providerUserId')
+        spotify_id = claims.get("providerUserId")
         if spotify_id:
-            profile['id'] = spotify_id
+            profile["id"] = spotify_id
 
-        if claims.get('displayName'):
-            profile['display_name'] = claims.get('displayName')
-        if claims.get('email'):
-            profile['email'] = claims.get('email')
-        if claims.get('spotifyProfileUrl'):
-            profile['external_urls'] = {'spotify': claims.get('spotifyProfileUrl')}
-        profile['can_be_master'] = profile.get('id') in self.trt.masters_list
+        if claims.get("displayName"):
+            profile["display_name"] = claims.get("displayName")
+        if claims.get("email"):
+            profile["email"] = claims.get("email")
+        if claims.get("spotifyProfileUrl"):
+            profile["external_urls"] = {"spotify": claims.get("spotifyProfileUrl")}
+        profile["can_be_master"] = profile.get("id") in self.trt.masters_list
         user.spotify_profile = profile
 
     async def _user_from_jwt_claims(self, claims):
-        spotify_id = claims.get('providerUserId')
+        spotify_id = claims.get("providerUserId")
         if not spotify_id:
             return None
 
@@ -352,13 +401,13 @@ class WebServer(web.Application):
             self._apply_claims_to_user(existing, claims)
             return existing
 
-        if not claims.get('spotifyAccessToken'):
+        if not claims.get("spotifyAccessToken"):
             return None
 
         user = thatradiothing.user.User(
             self.trt,
             uuid.uuid4(),
-            self.trt.url + 'auth_return',
+            self.trt.url + "auth_return",
             self.trt.client_id,
             self.trt.client_secret,
         )
@@ -373,7 +422,8 @@ class WebServer(web.Application):
     async def run(self):
         """Bind the TCP site and start the Socket.IO push loop."""
         await self.runner.setup()
-        self.site = web.TCPSite(self.runner, '0.0.0.0', self.trt.port)
+        # Container deployments intentionally expose the service on all interfaces.
+        self.site = web.TCPSite(self.runner, "0.0.0.0", self.trt.port)  # noqa: S104
         await self.site.start()
         await self.sio_gateway.start()
 
@@ -382,55 +432,93 @@ class WebServer(web.Application):
     # ------------------------------------------------------------------
 
     async def index(self, request):
+        """Show the login page or redirect authenticated users to the player."""
+
         user = await self.logged_in_user(request)
         if user:
-            return web.HTTPTemporaryRedirect('/player', headers={'Cache-Control': 'No-Cache'})
-        return web.FileResponse('./static/index.htm', headers={'Cache-Control': 'No-Cache'})
+            return web.HTTPTemporaryRedirect("/player", headers={"Cache-Control": "No-Cache"})
+        return web.FileResponse("./static/index.htm", headers={"Cache-Control": "No-Cache"})
 
     async def player(self, request):
+        """Serve the listener player to an authenticated user."""
+
         user = await self.logged_in_user(request)
         if not user:
-            return web.HTTPTemporaryRedirect('/', headers={'Cache-Control': 'No-Cache'})
-        return web.FileResponse('./static/player.htm', headers={'Cache-Control': 'No-Cache'})
+            return web.HTTPTemporaryRedirect("/", headers={"Cache-Control": "No-Cache"})
+        return web.FileResponse("./static/player.htm", headers={"Cache-Control": "No-Cache"})
 
     async def logo(self, request):
-        return web.FileResponse('./static/logo.png')
+        """Serve the application logo asset."""
+
+        return web.FileResponse("./static/logo.png")
 
     async def auth(self, request):
+        """Start Spotify OAuth with state bound to a short-lived secure cookie."""
+
         client_id = self.trt.client_id
-        scope = ' '.join(self.trt.scopes)
-        redirect_uri = self.trt.url + 'auth_return'
+        scope = " ".join(self.trt.scopes)
+        redirect_uri = self.trt.url + "auth_return"
         state = uuid.uuid4()
 
-        redirect_to = (
-            f'https://accounts.spotify.com/authorize?'
-            f'response_type=code'
-            f'&client_id={client_id}'
-            f'&scope={scope}'
-            f'&redirect_uri={redirect_uri}'
-            f'&state={state}'
+        redirect_to = "https://accounts.spotify.com/authorize?" + urlencode(
+            {
+                "response_type": "code",
+                "client_id": client_id,
+                "scope": scope,
+                "redirect_uri": redirect_uri,
+                "state": str(state),
+            }
         )
 
-        if request.cookies.get('state'):
-            user_exists = await self.trt.find_user(session_id=request.cookies.get('state'))
+        return_to = request.rel_url.query.get("returnTo", "/successful_auth")
+        if (
+            not isinstance(return_to, str)
+            or len(return_to) > 1024
+            or not return_to.startswith("/")
+            or return_to.startswith("//")
+            or "\\" in return_to
+        ):
+            return_to = "/successful_auth"
+
+        if request.cookies.get("state"):
+            user_exists = await self.trt.find_user(session_id=request.cookies.get("state"))
             if user_exists:
                 self.trt.users.remove(user_exists)
 
         response = web.HTTPFound(redirect_to)
-        user = thatradiothing.user.User(self.trt, state, redirect_uri, client_id, self.trt.client_secret)
+        user = thatradiothing.user.User(
+            self.trt, state, redirect_uri, client_id, self.trt.client_secret
+        )
         debug(redirect_uri)
         self.trt.users.append(user)
-        response.cookies['state'] = str(state)
+        oauth_cookie = {
+            "httponly": True,
+            "secure": self.trt.auth_cookie_secure,
+            "samesite": "Lax",
+            "path": "/",
+            "max_age": 600,
+        }
+        response.set_cookie("state", str(state), **oauth_cookie)
+        response.set_cookie("auth_return_to", return_to, **oauth_cookie)
         return response
 
     async def auth_return(self, request):
-        state = request.rel_url.query['state']
+        """Finish Spotify OAuth only when callback and cookie state agree."""
+
+        state = request.rel_url.query.get("state")
+        code = request.rel_url.query.get("code")
+        if (
+            not state
+            or not code
+            or not secrets.compare_digest(str(request.cookies.get("state") or ""), str(state))
+        ):
+            raise web.HTTPBadRequest(reason="OAuth state or code is missing or invalid")
         debug(state)
         for user in self.trt.users:
             debug(str(user.session_id))
             if str(user.session_id) == str(state):
                 # Second step of the auth
-                user.auth_code = request.rel_url.query['code']
+                user.auth_code = code
                 result = await user.request_tokens()  # also loads user profile
                 if result:
                     # Drop any previous session objects for this Spotify
@@ -448,7 +536,18 @@ class WebServer(web.Application):
                         except (KeyError, ValueError):
                             continue
 
-                    response = web.HTTPFound('/successful_auth')
+                    return_to = request.cookies.get("auth_return_to", "/successful_auth")
+                    if (
+                        not isinstance(return_to, str)
+                        or len(return_to) > 1024
+                        or not return_to.startswith("/")
+                        or return_to.startswith("//")
+                        or "\\" in return_to
+                    ):
+                        return_to = "/successful_auth"
+                    response = web.HTTPFound(return_to)
+                    response.del_cookie("auth_return_to", path="/")
+                    response.del_cookie("state", path="/")
                     self._set_auth_cookie(response, user)
                     return response
                 return web.Response(text="failed to get auth token")
@@ -456,24 +555,26 @@ class WebServer(web.Application):
             return web.Response(text="no auth")
 
     async def logout(self, request):
+        """Remove the current user session and clear both auth cookies."""
+
+        self._require_mutation_origin(request)
         user = await self.logged_in_user(request)
         if not user:
-            return web.HTTPTemporaryRedirect('/')
+            return web.HTTPTemporaryRedirect("/")
 
         if self.trt.master.master_user == user:
             await self.resign_master_user(request)
 
         self.trt.users.remove(user)
 
-        response = web.HTTPTemporaryRedirect('/')
+        response = web.HTTPTemporaryRedirect("/")
         self._clear_auth_cookie(response)
         return response
 
     async def successful_auth(self, request):
-        return web.FileResponse('./static/successful-auth.htm')
+        """Serve the OAuth completion page."""
 
-    async def exit(self, request):
-        exit()
+        return web.FileResponse("./static/successful-auth.htm")
 
     async def logged_in_user(self, request):
         """Resolve the currently-authenticated user for an aiohttp request.
@@ -503,16 +604,16 @@ class WebServer(web.Application):
                 # Record the expiry we started with so the cookie-rotation
                 # middleware can detect when auth_headers() has silently
                 # refreshed tokens and push the fresh ones back to the client.
-                loaded_expiry = claims.get('spotifyExpiresAt')
+                loaded_expiry = claims.get("spotifyExpiresAt")
                 if isinstance(loaded_expiry, (int, float)):
-                    request['auth_expires_at_on_load'] = int(loaded_expiry)
+                    request["auth_expires_at_on_load"] = int(loaded_expiry)
 
                 user_from_claims = await self._user_from_jwt_claims(claims)
                 if user_from_claims and await user_from_claims.auth_headers():
-                    request['user'] = user_from_claims
+                    request["user"] = user_from_claims
                     return user_from_claims
 
-        user_session_id = request.cookies.get('state', False)
+        user_session_id = request.cookies.get("state", False)
         if not user_session_id:
             return None
 
@@ -523,10 +624,12 @@ class WebServer(web.Application):
         if not await user.auth_headers():
             return False
 
-        request['user'] = user
+        request["user"] = user
         return user
 
     async def devices(self, request):
+        """Return the current user's available Spotify devices."""
+
         user = await self.logged_in_user(request)
         if not user:
             return web.HTTPUnauthorized(reason="Not logged in.")
@@ -535,13 +638,16 @@ class WebServer(web.Application):
         return web.Response(body=json.dumps(devices))
 
     async def set_active_device(self, request):
+        """Select a Spotify playback device for the current listener."""
+
+        self._require_mutation_origin(request)
         user = await self.logged_in_user(request)
         if not user:
             return web.HTTPUnauthorized(reason="Not logged in.")
 
-        data = await request.json()
+        data = await self._json_body(request)
 
-        if not data.get('device_id'):
+        if not data.get("device_id"):
             return web.HTTPExpectationFailed(reason="'device_id' not found.")
 
         device_id = data["device_id"]
@@ -551,39 +657,52 @@ class WebServer(web.Application):
             return web.HTTPNotFound()
 
         user.touch_interaction()
-        return web.Response(body=json.dumps({'status': True}))
+        return web.Response(body=json.dumps({"status": True}))
 
     async def set_master_user(self, request):
+        """Promote an authorized listener to the human master role."""
+
+        self._require_mutation_origin(request)
         user = await self.logged_in_user(request)
         if not user or not user.spotify_profile:
             return web.HTTPUnauthorized()
 
-        if user.spotify_profile['can_be_master']:
-            self.trt.master.master_user = user
+        if user.spotify_profile["can_be_master"]:
             # Select Master's first device.
             # Normally 'play' does this automatically but master does not receive play API calls.
-            await self.trt.master.master_user.selected_device()
+            if not await user.selected_device():
+                return web.HTTPConflict(reason="No Spotify playback device is available")
+            self.trt.master.master_user = user
 
-            debug('NEW MASTER USER')
-            debug(user.spotify_profile['display_name'])
+            debug("NEW MASTER USER")
+            debug(user.spotify_profile["display_name"])
             user.touch_interaction()
-            return web.Response(body='OK')
+            return web.Response(body="OK")
 
         return web.HTTPUnauthorized()
 
     async def resign_master_user(self, request):
+        """Return control from the current human master to AutoDJ."""
+
+        self._require_mutation_origin(request)
         user = await self.logged_in_user(request)
         if not user or not user.spotify_profile:
             return web.HTTPUnauthorized()
 
-        if user.spotify_profile['can_be_master'] and user == self.trt.master.master_user:
-            self.trt.master.master_user = None  # TODO: maybe bot here ?
+        if user.spotify_profile["can_be_master"] and user == self.trt.master.master_user:
+            # The schedule continued changing in the background, but AutoDJ's
+            # elapsed clock was not audible. Resume its current schedule from
+            # a freshly started track rather than jumping into stale progress.
+            await self.trt.autodj.advance_track(reason="human-resign")
+            self.trt.master.master_user = None
             user.touch_interaction()
-            return web.Response(body='OK')
+            return web.Response(body="OK")
 
         return web.HTTPUnauthorized()
 
     async def profile(self, request):
+        """Return the authenticated listener's public radio profile."""
+
         user = await self.logged_in_user(request)
         if not user or not user.spotify_profile:
             return web.HTTPUnauthorized()
@@ -591,15 +710,18 @@ class WebServer(web.Application):
         is_user_master = self.trt.master.master_user == user
 
         user_profile = {
-            'profile': user.spotify_profile,
-            'can_be_master': user.spotify_profile['can_be_master'],
-            'is_master': is_user_master,
-            'message': user.message
+            "profile": user.spotify_profile,
+            "can_be_master": user.spotify_profile["can_be_master"],
+            "is_master": is_user_master,
+            "message": user.message,
         }
 
         return web.Response(body=json.dumps(user_profile))
 
     async def enable(self, request):
+        """Enable synchronized playback and begin device discovery."""
+
+        self._require_mutation_origin(request)
         user = await self.logged_in_user(request)
         if not user:
             return web.HTTPUnauthorized()
@@ -616,6 +738,9 @@ class WebServer(web.Application):
         return web.HTTPOk()
 
     async def disable(self, request):
+        """Disable synchronized playback and pause the listener's device."""
+
+        self._require_mutation_origin(request)
         user = await self.logged_in_user(request)
         if not user:
             return web.HTTPUnauthorized()
@@ -626,7 +751,7 @@ class WebServer(web.Application):
         # auto-resume playback if a device comes online after the user
         # explicitly disabled.
         user.end_waiting_for_device()
-        user.message = ''
+        user.message = ""
         user.message_expires_at = 0.0
         await user.pause()  # Pause user.
         user.play_if_paused = True  # Next time enabled, it will play regardless of pause.
@@ -654,43 +779,38 @@ class WebServer(web.Application):
         # the payload, so clients stop seeing it on the next push/diff.
         user.expire_message_if_due()
 
-        master_user = {
-            'display_name': None,
-            'progress_ms': None,
-            'external_url': None
-        }
+        master_user = {"display_name": None, "progress_ms": None, "external_url": None}
 
         if self.trt.master.master_user:
             master_profile = self.trt.master.master_user.spotify_profile or {}
-            master_user['display_name'] = master_profile.get('display_name')
+            master_user["display_name"] = master_profile.get("display_name")
             if self.trt.master.now_playing:
-                master_user['progress_ms'] = self.trt.master.now_playing["progress_ms"]
-            external_urls = master_profile.get('external_urls') or {}
-            master_user['external_url'] = external_urls.get('spotify')
+                master_user["progress_ms"] = self.trt.master.now_playing["progress_ms"]
+            external_urls = master_profile.get("external_urls") or {}
+            master_user["external_url"] = external_urls.get("spotify")
 
         is_user_master = self.trt.master.master_user == user
-        can_be_master = bool(user.spotify_profile and user.spotify_profile.get('can_be_master'))
+        can_be_master = bool(user.spotify_profile and user.spotify_profile.get("can_be_master"))
 
         payload = {
-            'now_playing': self.trt.master.now_playing_track,
-            'master_user': master_user,
-            'listeners': self.trt.master.last_listener_count,
-            'enabled': user.enabled,
-            'profile': user.spotify_profile,
-            'can_be_master': can_be_master,
-            'is_master': is_user_master,
-            'message': user.message,
-            'devices': await user.list_devices(),
+            "now_playing": self.trt.master.now_playing_track,
+            "master_user": master_user,
+            "listeners": self.trt.master.last_listener_count,
+            "enabled": user.enabled,
+            "profile": user.spotify_profile,
+            "can_be_master": can_be_master,
+            "is_master": is_user_master,
+            "message": user.message,
+            "devices": await user.list_devices(),
         }
 
         if can_be_master:
-            payload['users'] = [await u.summary() for u in self.trt.users]
+            payload["users"] = [await u.summary() for u in self.trt.users]
 
         return payload
 
     async def status(self, request):
-        """
-        Return the current radio state for the logged-in user.
+        """Return the current radio state for the logged-in user.
 
         DEPRECATED — clients should subscribe to the Socket.IO ``status``
         event instead of polling this endpoint. The websocket channel
@@ -721,27 +841,49 @@ class WebServer(web.Application):
         """
         user = await self.logged_in_user(request)
         if not user:
-            return web.HTTPUnauthorized(headers={
-                'Deprecation': 'true',
-                'Link': '</socket.io/>; rel="successor-version"',
-            })
+            return web.HTTPUnauthorized(
+                headers={
+                    "Deprecation": "true",
+                    "Link": '</socket.io/>; rel="successor-version"',
+                }
+            )
 
         payload = await self.build_status_payload(user)
         return web.Response(
             body=json.dumps(payload),
             headers={
-                'Deprecation': 'true',
-                'Link': '</socket.io/>; rel="successor-version"',
+                "Deprecation": "true",
+                "Link": '</socket.io/>; rel="successor-version"',
             },
         )
 
     async def now_playing(self, request):
-        payload = {
-            'now_playing': self.trt.master.now_playing_track
-        }
+        """Return the public current-track snapshot."""
+
+        payload = {"now_playing": self.trt.master.now_playing_track}
         return web.Response(body=json.dumps(payload))
 
+    async def health_live(self, request):
+        """Liveness probe: the process and HTTP server are running."""
+
+        return web.json_response({"ok": True})
+
+    async def health_ready(self, request):
+        """Readiness probe: persistence, catalog, and scheduler are usable."""
+
+        scheduler = getattr(self.trt, "schedule_coordinator", None)
+        ready = bool(
+            getattr(getattr(self.trt, "db", None), "connection", None)
+            and getattr(self.trt.autodj, "selected_playlist", None)
+            and scheduler
+            and scheduler.last_error is None
+        )
+        payload = {"ok": ready, "schedule": scheduler.status() if scheduler else None}
+        return web.json_response(payload, status=200 if ready else 503)
+
     async def users(self, request):
+        """Return listener summaries to an authorized master account."""
+
         user = await self.logged_in_user(request)
         if not user:
             return web.HTTPUnauthorized()
