@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sqlite3
 import uuid
 from collections.abc import AsyncIterator, Iterable, Mapping
 from contextlib import asynccontextmanager
@@ -25,6 +26,46 @@ MIGRATIONS: tuple[tuple[int, str], ...] = (
 )
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 
+# Writable columns of ``schedule_series``, in the order the INSERT expects them.
+# Named once so that adding a column is a single edit here plus the schema,
+# rather than four coordinated edits across insert, update, and split.
+SERIES_COLUMNS: tuple[str, ...] = (
+    "title",
+    "playlist_id",
+    "dtstart_local",
+    "timezone",
+    "duration_seconds",
+    "rrule",
+    "priority",
+    "transition_policy",
+    "enabled",
+    "source",
+    "external_calendar_id",
+    "external_event_id",
+)
+
+_INSERT_SERIES_SQL = """INSERT INTO schedule_series
+       (id, title, playlist_id, dtstart_local, timezone, duration_seconds,
+        rrule, priority, transition_policy, enabled, source,
+        external_calendar_id, external_event_id, version,
+        created_at, updated_at, created_by, updated_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)"""
+
+
+def _sql_value(value: Any) -> Any:
+    """Coerce a Python value for SQLite, mapping bools to their integer form.
+
+    SQLite has no boolean type; ``enabled`` is an INTEGER column. Passing a bare
+    ``bool`` works by accident of the driver but makes stored values compare
+    inconsistently against the ``0``/``1`` written everywhere else.
+    """
+
+    if value is True:
+        return 1
+    if value is False:
+        return 0
+    return value
+
 
 def utc_now() -> str:
     """Return a sortable UTC timestamp in RFC3339 form."""
@@ -39,7 +80,24 @@ def new_id() -> str:
 
 
 class RadioDatabase:
-    """Async SQLite repository with one connection and serialized writers."""
+    """Async SQLite repository owning one connection, with serialized access.
+
+    The repository owns the ``aiosqlite`` connection end to end: it is created
+    by :meth:`open` and released only by :meth:`close`. Callers never construct
+    or close a connection, and the object yielded by :meth:`transaction` is that
+    same shared connection, on loan.
+
+    One connection means one event loop. Every method must be awaited from the
+    loop that ran :meth:`open`; there is no thread-safe entry point, and the
+    only work deliberately pushed to a thread is reading migration files.
+
+    Reads *and* writes are serialized through ``_connection_lock`` -- not just
+    writes. A transaction belongs to the connection rather than to a task, so
+    letting an unrelated read run concurrently would place it inside whatever
+    transaction another task currently has open. SQLite admits one writer
+    anyway, and WAL keeps the read cost acceptable for a single coordinator
+    process.
+    """
 
     def __init__(
         self,
@@ -132,7 +190,25 @@ class RadioDatabase:
 
     @asynccontextmanager
     async def transaction(self) -> AsyncIterator[aiosqlite.Connection]:
-        """Run a serialized transaction and roll it back on any exception."""
+        """Run a serialized transaction and roll it back on any exception.
+
+        The yielded connection is the repository's single shared connection.
+        Callers borrow it for the duration of the block: never close it, and
+        never issue ``COMMIT``/``ROLLBACK`` on it yourself.
+
+        ``_connection_lock`` is a plain :class:`asyncio.Lock` and is therefore
+        **not** reentrant. Inside the block, use the yielded connection
+        directly. Calling any other repository method -- ``fetch_one``,
+        ``fetch_all``, ``execute``, or any higher-level helper built on them --
+        deadlocks the whole service, because it waits on a lock this task
+        already holds, and nothing will ever release it. This is the single
+        easiest way to take the radio off the air, and it fails silently: no
+        exception, no timeout, just a hung process.
+
+        Read-back helpers such as :meth:`get_schedule_series` must therefore run
+        *after* the block exits, which is why the create/split methods return
+        their row with a second call rather than reading it inline.
+        """
 
         connection = self._require_connection()
         async with self._connection_lock:
@@ -492,9 +568,7 @@ class RadioDatabase:
             column = "catalog_json" if key == "catalog" else key
             columns.append(f"{column} = ?")
             parameters.append(
-                json.dumps(value, separators=(",", ":"))
-                if key == "catalog"
-                else (1 if value is True else 0 if value is False else value)
+                json.dumps(value, separators=(",", ":")) if key == "catalog" else _sql_value(value)
             )
         columns += ["updated_at = ?", "updated_by = ?"]
         parameters += [utc_now(), actor, playlist_id]
@@ -505,18 +579,49 @@ class RadioDatabase:
         return await self.get_playlist(playlist_id)
 
     async def list_schedule_series(self, include_disabled: bool = False) -> list[dict[str, Any]]:
-        """Return schedule series with their dates and per-occurrence overrides."""
+        """Return schedule series with their dates and per-occurrence overrides.
+
+        Three queries regardless of series count. The obvious per-row loop is a
+        3N+1: this runs on the coordinator's 30-second tick, on every
+        administrative mutation via ``wake()``, and on every ``/schedule``
+        request, so the round trips are worth batching. Both companion queries
+        are index-backed -- ``UNIQUE(series_id, kind, occurrence_start_utc)``
+        also satisfies the ordering, and ``UNIQUE(series_id,
+        original_start_utc)`` covers the override lookup by its prefix.
+        """
 
         where = "WHERE enabled = 1" if not include_disabled else ""
         rows = await self.fetch_all(
             f"SELECT * FROM schedule_series {where} ORDER BY dtstart_local, priority DESC"
         )
+        if not rows:
+            return rows
+
+        ids = [row["id"] for row in rows]
+        placeholders = ",".join("?" * len(ids))
+        date_rows = await self.fetch_all(
+            f"SELECT series_id, kind, occurrence_start_utc FROM schedule_dates "
+            f"WHERE series_id IN ({placeholders}) ORDER BY occurrence_start_utc",
+            tuple(ids),
+        )
+        override_rows = await self.fetch_all(
+            f"SELECT * FROM schedule_overrides WHERE series_id IN ({placeholders})",
+            tuple(ids),
+        )
+
+        dates: dict[tuple[str, str], list[str]] = {}
+        for date_row in date_rows:
+            key = (str(date_row["series_id"]), str(date_row["kind"]))
+            dates.setdefault(key, []).append(str(date_row["occurrence_start_utc"]))
+        overrides: dict[str, list[dict[str, Any]]] = {}
+        for override_row in override_rows:
+            overrides.setdefault(str(override_row["series_id"]), []).append(override_row)
+
         for row in rows:
-            row["rdates"] = await self._schedule_dates(row["id"], "rdate")
-            row["exdates"] = await self._schedule_dates(row["id"], "exdate")
-            row["overrides"] = await self.fetch_all(
-                "SELECT * FROM schedule_overrides WHERE series_id = ?", (row["id"],)
-            )
+            series_id = str(row["id"])
+            row["rdates"] = dates.get((series_id, "rdate"), [])
+            row["exdates"] = dates.get((series_id, "exdate"), [])
+            row["overrides"] = overrides.get(series_id, [])
         return rows
 
     async def get_schedule_series(self, series_id: str) -> dict[str, Any] | None:
@@ -541,39 +646,79 @@ class RadioDatabase:
         )
         return [str(row["occurrence_start_utc"]) for row in rows]
 
+    @staticmethod
+    async def _insert_series(
+        connection: aiosqlite.Connection,
+        series_id: str,
+        values: dict[str, Any],
+        actor: str,
+        now: str,
+    ) -> None:
+        """Insert one version-one series row on an open transaction.
+
+        Caller must already hold the transaction: this issues no lock of its
+        own and does not commit.
+        """
+
+        await connection.execute(
+            _INSERT_SERIES_SQL,
+            (
+                series_id,
+                values["title"],
+                values["playlist_id"],
+                values["dtstart_local"],
+                values["timezone"],
+                int(values["duration_seconds"]),
+                values.get("rrule"),
+                int(values.get("priority", 0)),
+                values.get("transition_policy", "immediate"),
+                1 if values.get("enabled", True) else 0,
+                values.get("source", "local"),
+                values.get("external_calendar_id"),
+                values.get("external_event_id"),
+                now,
+                now,
+                actor,
+                actor,
+            ),
+        )
+
+    @staticmethod
+    async def _current_series_version(
+        connection: aiosqlite.Connection, series_id: str, expected_version: int | None
+    ) -> int | None:
+        """Read a series version, enforcing an optional optimistic precondition.
+
+        Caller must already hold the transaction. Returns ``None`` when the row
+        does not exist so each caller can choose its own not-found result; the
+        version mismatch is raised here because every caller treats it the same.
+
+        Raises:
+            VersionConflict: If *expected_version* is set and does not match.
+
+        """
+
+        cursor = await connection.execute(
+            "SELECT version FROM schedule_series WHERE id = ?", (series_id,)
+        )
+        try:
+            row = await cursor.fetchone()
+        finally:
+            await cursor.close()
+        if not row:
+            return None
+        current_version = int(row[0])
+        if expected_version is not None and current_version != expected_version:
+            raise VersionConflict(series_id, expected_version, current_version)
+        return current_version
+
     async def create_schedule_series(self, values: dict[str, Any], actor: str) -> dict[str, Any]:
         """Create a version-one schedule series and its explicit dates atomically."""
 
         series_id = str(values.get("id") or new_id())
         now = utc_now()
         async with self.transaction() as connection:
-            await connection.execute(
-                """INSERT INTO schedule_series
-                   (id, title, playlist_id, dtstart_local, timezone, duration_seconds,
-                    rrule, priority, transition_policy, enabled, source,
-                    external_calendar_id, external_event_id, version,
-                    created_at, updated_at, created_by, updated_by)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)""",
-                (
-                    series_id,
-                    values["title"],
-                    values["playlist_id"],
-                    values["dtstart_local"],
-                    values["timezone"],
-                    int(values["duration_seconds"]),
-                    values.get("rrule"),
-                    int(values.get("priority", 0)),
-                    values.get("transition_policy", "immediate"),
-                    1 if values.get("enabled", True) else 0,
-                    values.get("source", "local"),
-                    values.get("external_calendar_id"),
-                    values.get("external_event_id"),
-                    now,
-                    now,
-                    actor,
-                    actor,
-                ),
-            )
+            await self._insert_series(connection, series_id, values, actor, now)
             await self._replace_dates(connection, series_id, values.get("rdates", []), "rdate")
             await self._replace_dates(connection, series_id, values.get("exdates", []), "exdate")
         created = await self.get_schedule_series(series_id)
@@ -589,43 +734,43 @@ class RadioDatabase:
         actor: str,
         expected_version: int | None = None,
     ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-        """End one series and insert its successor in one transaction."""
+        """End one series and insert its successor in one transaction.
+
+        Args:
+            series_id: Series being truncated; it keeps its identity and
+                accumulated history.
+            old_values: Columns to write back onto the truncated series. The
+                private key ``_future_override_ids`` is **not** a column: it
+                lists override IDs belonging to the new tail, which are
+                reassigned to the successor inside this same transaction.
+                ``admin_api.split_series`` is the only supported producer.
+            future_values: Complete column set for the successor series, which
+                starts again at version 1.
+            actor: Spotify ID or system label recorded on both rows.
+            expected_version: Optional optimistic-lock precondition, checked
+                against the truncated series only.
+
+        Returns:
+            ``(truncated, successor)``, or ``(None, None)`` when *series_id*
+            does not exist.
+
+        Raises:
+            VersionConflict: If *expected_version* is stale.
+
+        """
 
         future_id = str(future_values.get("id") or new_id())
         now = utc_now()
         async with self.transaction() as connection:
-            cursor = await connection.execute(
-                "SELECT version FROM schedule_series WHERE id = ?", (series_id,)
+            current_version = await self._current_series_version(
+                connection, series_id, expected_version
             )
-            current = await cursor.fetchone()
-            if not current:
+            if current_version is None:
                 return None, None
-            current_version = int(current[0])
-            if expected_version is not None and current_version != expected_version:
-                raise VersionConflict(series_id, expected_version, current_version)
 
-            fields = {
-                key: old_values[key]
-                for key in (
-                    "title",
-                    "playlist_id",
-                    "dtstart_local",
-                    "timezone",
-                    "duration_seconds",
-                    "rrule",
-                    "priority",
-                    "transition_policy",
-                    "enabled",
-                    "source",
-                    "external_calendar_id",
-                    "external_event_id",
-                )
-                if key in old_values
-            }
+            fields = {key: old_values[key] for key in SERIES_COLUMNS if key in old_values}
             assignments = [f"{key} = ?" for key in fields]
-            parameters: list[Any] = [
-                1 if value is True else 0 if value is False else value for value in fields.values()
-            ]
+            parameters: list[Any] = [_sql_value(value) for value in fields.values()]
             assignments += ["version = ?", "updated_at = ?", "updated_by = ?"]
             parameters += [current_version + 1, now, actor, series_id]
             await connection.execute(
@@ -633,33 +778,7 @@ class RadioDatabase:
                 tuple(parameters),
             )
 
-            await connection.execute(
-                """INSERT INTO schedule_series
-                   (id, title, playlist_id, dtstart_local, timezone, duration_seconds,
-                    rrule, priority, transition_policy, enabled, source,
-                    external_calendar_id, external_event_id, version,
-                    created_at, updated_at, created_by, updated_by)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)""",
-                (
-                    future_id,
-                    future_values["title"],
-                    future_values["playlist_id"],
-                    future_values["dtstart_local"],
-                    future_values["timezone"],
-                    int(future_values["duration_seconds"]),
-                    future_values.get("rrule"),
-                    int(future_values.get("priority", 0)),
-                    future_values.get("transition_policy", "immediate"),
-                    1 if future_values.get("enabled", True) else 0,
-                    future_values.get("source", "local"),
-                    future_values.get("external_calendar_id"),
-                    future_values.get("external_event_id"),
-                    now,
-                    now,
-                    actor,
-                    actor,
-                ),
-            )
+            await self._insert_series(connection, future_id, future_values, actor, now)
             await self._replace_dates(
                 connection, future_id, future_values.get("rdates", []), "rdate"
             )
@@ -707,40 +826,17 @@ class RadioDatabase:
     ) -> dict[str, Any] | None:
         """Patch a series under an optional optimistic version precondition."""
 
-        fields = {
-            key: values[key]
-            for key in (
-                "title",
-                "playlist_id",
-                "dtstart_local",
-                "timezone",
-                "duration_seconds",
-                "rrule",
-                "priority",
-                "transition_policy",
-                "enabled",
-                "source",
-                "external_calendar_id",
-                "external_event_id",
-            )
-            if key in values
-        }
+        fields = {key: values[key] for key in SERIES_COLUMNS if key in values}
         if fields or "rdates" in values or "exdates" in values:
             assignments = [f"{key} = ?" for key in fields]
-            parameters: list[Any] = [
-                1 if value is True else 0 if value is False else value for value in fields.values()
-            ]
+            parameters: list[Any] = [_sql_value(value) for value in fields.values()]
             assignments += ["version = ?", "updated_at = ?", "updated_by = ?"]
             async with self.transaction() as connection:
-                cursor = await connection.execute(
-                    "SELECT version FROM schedule_series WHERE id = ?", (series_id,)
+                current_version = await self._current_series_version(
+                    connection, series_id, expected_version
                 )
-                current = await cursor.fetchone()
-                if not current:
+                if current_version is None:
                     return None
-                current_version = int(current[0])
-                if expected_version is not None and current_version != expected_version:
-                    raise VersionConflict(series_id, expected_version, current_version)
                 parameters += [current_version + 1, utc_now(), actor, series_id]
                 await connection.execute(
                     f"UPDATE schedule_series SET {', '.join(assignments)} WHERE id = ?",
@@ -781,16 +877,11 @@ class RadioDatabase:
         """Delete a schedule series after an optional optimistic version check."""
 
         async with self.transaction() as connection:
-            cursor = await connection.execute(
-                "SELECT version FROM schedule_series WHERE id = ?",
-                (series_id,),
+            current_version = await self._current_series_version(
+                connection, series_id, expected_version
             )
-            current = await cursor.fetchone()
-            if not current:
+            if current_version is None:
                 return False
-            current_version = int(current[0])
-            if expected_version is not None and current_version != expected_version:
-                raise VersionConflict(series_id, expected_version, current_version)
             cursor = await connection.execute(
                 "DELETE FROM schedule_series WHERE id = ?", (series_id,)
             )
@@ -808,38 +899,36 @@ class RadioDatabase:
         override_id = new_id()
         now = utc_now()
         async with self.transaction() as connection:
-            version_cursor = await connection.execute(
-                "SELECT version FROM schedule_series WHERE id = ?",
-                (series_id,),
+            current_version = await self._current_series_version(
+                connection, series_id, expected_version
             )
-            current = await version_cursor.fetchone()
-            if not current:
+            if current_version is None:
                 raise KeyError(series_id)
-            current_version = int(current[0])
-            if current_version != expected_version:
-                raise VersionConflict(series_id, expected_version, current_version)
-            await connection.execute(
-                """INSERT INTO schedule_overrides
-                   (id, series_id, original_start_utc, action, title, playlist_id,
-                    start_local, timezone, duration_seconds, priority, created_at,
-                    updated_at, updated_by)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    override_id,
-                    series_id,
-                    values["original_start_utc"],
-                    values["action"],
-                    values.get("title"),
-                    values.get("playlist_id"),
-                    values.get("start_local"),
-                    values.get("timezone"),
-                    values.get("duration_seconds"),
-                    values.get("priority"),
-                    now,
-                    now,
-                    actor,
-                ),
-            )
+            try:
+                await connection.execute(
+                    """INSERT INTO schedule_overrides
+                       (id, series_id, original_start_utc, action, title, playlist_id,
+                        start_local, timezone, duration_seconds, priority, created_at,
+                        updated_at, updated_by)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        override_id,
+                        series_id,
+                        values["original_start_utc"],
+                        values["action"],
+                        values.get("title"),
+                        values.get("playlist_id"),
+                        values.get("start_local"),
+                        values.get("timezone"),
+                        values.get("duration_seconds"),
+                        values.get("priority"),
+                        now,
+                        now,
+                        actor,
+                    ),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise OverrideExists(series_id, str(values["original_start_utc"])) from exc
             await connection.execute(
                 """UPDATE schedule_series
                    SET version = ?, updated_at = ?, updated_by = ?
@@ -911,6 +1000,23 @@ class RadioDatabase:
                 (playlist_id,),
             )
             return cursor.rowcount > 0
+
+
+class OverrideExists(RuntimeError):
+    """Raised when an occurrence already carries a schedule exception.
+
+    The uniqueness rule lives in the schema as
+    ``UNIQUE(series_id, original_start_utc)``. Translating the driver's
+    ``IntegrityError`` here keeps ``sqlite3`` from leaking into the HTTP layer,
+    which would otherwise have to import the driver purely to catch it.
+    """
+
+    def __init__(self, series_id: str, original_start_utc: str):
+        """Record which occurrence already has an exception."""
+
+        super().__init__(f"An exception already exists for {series_id} at {original_start_utc}")
+        self.series_id = series_id
+        self.original_start_utc = original_start_utc
 
 
 class VersionConflict(RuntimeError):

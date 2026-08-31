@@ -25,6 +25,15 @@ if load_dotenv is not None:
     # can continue injecting the exact same variables through Docker/CI.
     load_dotenv()
 
+# Bounds on how often playlist catalogs may be re-fetched from Spotify. This is
+# one policy with three enforcement points -- the startup environment parse
+# below, the admin API's settings validator, and the scheduler's clamp on the
+# stored value -- so they all read these constants rather than repeating the
+# numbers. The floor bounds Spotify API cost; the ceiling (7 days) keeps a
+# renamed or deleted playlist from going unnoticed indefinitely.
+CATALOG_REFRESH_MIN_SECONDS = 300
+CATALOG_REFRESH_MAX_SECONDS = 604_800
+
 
 def _split_csv(value: str | None, default: list[str] | None = None) -> list[str]:
     """Split a comma-separated variable, trimming and removing empty entries."""
@@ -204,8 +213,8 @@ def build_config() -> dict[str, Any]:
             os.getenv("TRT_CATALOG_REFRESH_INTERVAL_SECONDS"),
             21_600,
             name="TRT_CATALOG_REFRESH_INTERVAL_SECONDS",
-            minimum=300,
-            maximum=604_800,
+            minimum=CATALOG_REFRESH_MIN_SECONDS,
+            maximum=CATALOG_REFRESH_MAX_SECONDS,
         ),
         "catalog_refresh_token": (os.getenv("TRT_CATALOG_REFRESH_TOKEN") or "").strip() or None,
         "auth_cookie_name": os.getenv("AUTH_COOKIE_NAME", "duudey_auth"),

@@ -13,6 +13,30 @@ from logzero import logger
 import thatradiothing.exceptions as exceptions
 
 
+def _normalized_items_page(page):
+    """Normalize one Spotify items page to the legacy ``tracks`` shape.
+
+    Spotify's current playlist endpoints return ``items[].item`` while older
+    releases returned ``items[].track``; both shapes are accepted here and
+    emitted as ``{"items": [{"track": ...}], "next": ...}``, which is what the
+    master next-track helper consumes. Entries whose track is missing or not an
+    object are dropped rather than propagated as ``None``.
+
+    Keeping this in one place matters: the shape moving underneath us is the
+    entire reason the normalization exists, so a future move must be handled in
+    exactly one function.
+    """
+
+    items = []
+    for entry in page.get("items", []) or []:
+        if not isinstance(entry, dict):
+            continue
+        track = entry.get("item") or entry.get("track")
+        if isinstance(track, dict):
+            items.append({"track": track})
+    return {"items": items, "next": page.get("next")}
+
+
 class User:
     """Store listener session state and perform authenticated Spotify calls."""
 
@@ -122,6 +146,16 @@ class User:
 
         self.waiting_for_device_until = 0.0
 
+    def _is_selected_device(self, device):
+        """Return whether *device* is this listener's chosen playback target.
+
+        An explicit ``is not None`` rather than a falsy check: no device may
+        compare equal to "nothing selected", and a sentinel string would match
+        a real device that happened to carry that ID.
+        """
+
+        return self._selected_device is not None and str(device["id"]) == str(self._selected_device)
+
     async def aiohttp_session(self):
         """Return this listener's reusable, bounded HTTP client session."""
 
@@ -164,7 +198,6 @@ class User:
             self.last_refresh = datetime.datetime.now(datetime.UTC)
 
             await self.users_profile()
-            # logger.info(pformat(vars(self)))
             return True
 
     async def refresh_tokens(self):
@@ -384,16 +417,7 @@ class User:
             if not isinstance(playlist.get("tracks"), dict) and isinstance(
                 playlist.get("items"), dict
             ):
-                current_items = playlist.pop("items")
-                playlist["tracks"] = {
-                    "items": [
-                        {"track": item.get("item") or item.get("track")}
-                        for item in current_items.get("items", [])
-                        if isinstance(item, dict)
-                        and isinstance(item.get("item") or item.get("track"), dict)
-                    ],
-                    "next": current_items.get("next"),
-                }
+                playlist["tracks"] = _normalized_items_page(playlist.pop("items"))
 
             # If metadata did not include item contents, fetch the dedicated
             # current endpoint. The fallback keeps old public-playlist
@@ -409,15 +433,7 @@ class User:
                     if items_response.status == 200:
                         current_items = await items_response.json(content_type=None)
                         if isinstance(current_items, dict):
-                            playlist["tracks"] = {
-                                "items": [
-                                    {"track": item.get("item") or item.get("track")}
-                                    for item in current_items.get("items", [])
-                                    if isinstance(item, dict)
-                                    and isinstance(item.get("item") or item.get("track"), dict)
-                                ],
-                                "next": current_items.get("next"),
-                            }
+                            playlist["tracks"] = _normalized_items_page(current_items)
 
             if playlist["tracks"]["next"]:
                 more_tracks = await self.get_more_playlist_tracks(
@@ -425,12 +441,6 @@ class User:
                 )
                 if more_tracks:
                     playlist["tracks"]["items"].extend(more_tracks)
-
-            """
-            # print(len(playlist["tracks"]["items"]))
-            with open('playlist.json', 'w+') as file:
-                json.dump(playlist, file)
-            """
 
             return playlist
 
@@ -451,12 +461,7 @@ class User:
                 pagination = await response.json(content_type=None)
             if not isinstance(pagination, dict):
                 return items or None
-            items.extend(
-                {"track": item.get("item") or item.get("track")}
-                for item in pagination.get("items", [])
-                if isinstance(item, dict)
-                and isinstance(item.get("item") or item.get("track"), dict)
-            )
+            items.extend(_normalized_items_page(pagination)["items"])
             next_url = pagination.get("next")
             if not next_url:
                 return items
@@ -505,9 +510,7 @@ class User:
         if self._devices_cache is not None and now < self._devices_cache_expires_at:
             cached = self._devices_cache
             for device in cached.get("devices", []):
-                device["selected_device"] = str(device["id"]) == str(
-                    self._selected_device if self._selected_device else " NONE "
-                )
+                device["selected_device"] = self._is_selected_device(device)
             return cached
 
         devices_url = self.api + "/v1/me/player/devices"
@@ -526,9 +529,7 @@ class User:
             body = await response.json(content_type=None)
             device_list = body.get("devices", []) if isinstance(body, dict) else []
             for device in device_list:
-                device["selected_device"] = str(device["id"]) == str(
-                    self._selected_device if self._selected_device else " NONE "
-                )
+                device["selected_device"] = self._is_selected_device(device)
 
             normalized = {"devices": device_list}
             if device_list:

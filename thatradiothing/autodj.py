@@ -1,17 +1,51 @@
-"""AutoDJ state machine and Spotify playlist-backed track selection."""
+"""AutoDJ state machine and Spotify playlist-backed track selection.
+
+AutoDJ is the fallback master: when no human DJ holds the role, ``master.py``
+reads its playback timeline and mirrors it onto every listener.
+
+State
+-----
+``now_playing["track"]`` is the whole state machine. It is either ``None``
+(nothing cued yet) or a dict that always carries **both** ``item`` and
+``next_track``. Nothing may leave it half-populated: ``master.py`` sends
+``[item.uri, next_track.uri]`` in a single Spotify play call so the listener's
+own queue already holds the following song, which is what keeps the track flip
+gapless on slow clients.
+
+Track selection
+---------------
+Tracks are drawn without replacement from ``_shuffle_bag``. The bag is refilled
+with the whole catalog and reshuffled only once it drains, so a playlist plays
+through completely before any track repeats. The ``exclude`` set is best effort:
+when the bag cannot satisfy it (a one-track playlist, or a bag down to its last
+entry) an immediate repeat is preferred over failing to cue anything.
+Activating a playlist empties the bag, so a catalog refresh restarts the
+rotation rather than resuming it.
+
+Locking
+-------
+Two locks, always taken in this order and never the reverse:
+
+* ``_activation_lock`` guards playlist switching, including the Spotify catalog
+  fetch. It may be held across network latency.
+* ``_state_lock`` guards ``now_playing``, ``selected_playlist`` and
+  ``_shuffle_bag``. It must never be held across I/O.
+
+Methods suffixed ``_locked`` require ``_state_lock`` to already be held.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import random
 import time
-from datetime import UTC, datetime
 from typing import Any
 
 import aiohttp
 from logzero import logger
 
 import thatradiothing.user
+from thatradiothing.db import utc_now
 from thatradiothing.spotify_catalog import CatalogError, SpotifyCatalogClient
 
 
@@ -112,7 +146,10 @@ class AutoDJ(thatradiothing.user.User):
                 "image_url": catalog.image_url,
                 "catalog": catalog.as_json(),
                 "catalog_revision": catalog.revision,
-                "validated_at": datetime.now(UTC).isoformat(),
+                # utc_now() rather than a local isoformat(): every other
+                # timestamp on this row is written with a trailing "Z", and
+                # SQLite compares these as text.
+                "validated_at": utc_now(),
                 "validation_error": None,
             },
             actor,
@@ -155,6 +192,30 @@ class AutoDJ(thatradiothing.user.User):
         Spotify I/O happens under ``_activation_lock`` but outside
         ``_state_lock``. Playback reads and skip controls therefore remain
         responsive while a cold playlist catalog is loading.
+
+        The audible track is restarted only when *force_restart* is set, the
+        playlist actually changed, or nothing was cued yet. The schedule
+        coordinator re-activates the *current* playlist on every tick, so
+        anything less conservative would restart the song a few times a minute.
+
+        Args:
+            playlist: Database playlist row, or any dict carrying
+                ``spotify_uri`` and optionally a cached ``catalog``.
+            force_restart: Restart playback even when the playlist is
+                unchanged, e.g. across a schedule boundary.
+            reason: Short audit label surfaced through :meth:`snapshot`.
+
+        Returns:
+            The post-activation snapshot. On a catalog fetch failure with a
+            usable playlist still selected, the *previous* snapshot is returned
+            instead and the failure is recorded in ``last_error`` -- check that
+            field rather than relying on an exception.
+
+        Raises:
+            CatalogError: If the catalog cannot be fetched and no usable
+                playlist is currently selected, or the playlist has no playable
+                tracks.
+
         """
 
         async with self._activation_lock:
@@ -206,7 +267,11 @@ class AutoDJ(thatradiothing.user.User):
             random.shuffle(self._shuffle_bag)
         candidates = [track for track in self._shuffle_bag if track.get("uri") not in excluded]
         if not candidates:
-            candidates = self._shuffle_bag or self._available_tracks_locked(excluded)
+            # The bag was just refilled from the whole catalog above, so an
+            # empty bag here means the playlist itself is empty. Otherwise
+            # every remaining track is excluded and we prefer an immediate
+            # repeat over failing to cue anything at all.
+            candidates = self._shuffle_bag
         if not candidates:
             raise CatalogError("Selected playlist has no playable tracks")
         # This is entertainment shuffle state, never a security decision.
@@ -236,6 +301,13 @@ class AutoDJ(thatradiothing.user.User):
                 else None,
             },
         }
+        # Two clocks are stamped for the same instant on purpose.
+        # _playback_started_monotonic is authoritative for advancing tracks in
+        # currently_playing(): monotonic time cannot jump when NTP steps the
+        # system clock, so a clock correction can never rewind or fast-forward
+        # the whole station. playback_started_at is wall clock and display-only
+        # -- snapshot() exports it as "track_started_at" for clients that need
+        # an absolute epoch value. Do not collapse these into one clock.
         elapsed_seconds = max(0, has_been_playing_for_ms) / 1000
         self.now_playing["playback_started_at"] = time.time() - elapsed_seconds
         self._playback_started_monotonic = time.monotonic() - elapsed_seconds

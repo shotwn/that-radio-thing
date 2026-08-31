@@ -32,7 +32,10 @@ class ThatRadioThing:
         self.scopes = CONFIG["scopes"]
         self.realtime_tolerance_ms = CONFIG["realtime_tolerance_ms"]
         self.masters_list = CONFIG["masters_list"]
-        self.admin_ids = CONFIG.get("admin_ids", [])
+        # A frozenset because this is membership-tested on every admin request
+        # and on every Socket.IO handshake; the config value never changes after
+        # startup, so rebuilding a set per check was pure waste.
+        self.admin_ids = frozenset(CONFIG.get("admin_ids", []))
         self.auth_cookie_name = CONFIG["auth_cookie_name"]
         self.logged_in_cookie_name = CONFIG["logged_in_cookie_name"]
         self.auth_cookie_domain = CONFIG["auth_cookie_domain"]
