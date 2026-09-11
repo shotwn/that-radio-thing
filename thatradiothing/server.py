@@ -518,15 +518,50 @@ class WebServer(web.Application):
                     # browser / tab, and we want the newest session to own
                     # the User record. Iterate a snapshot (list(...)) so the
                     # remove() calls don't skip entries in the live list.
-                    for prev_user in list(self.trt.users):
-                        if prev_user is user:
-                            continue
+                    #
+                    # Matching is done on Spotify id, which only exists once
+                    # request_tokens() has loaded the profile. Two kinds of
+                    # entry therefore have to be skipped rather than compared:
+                    #
+                    # * ``prev_user`` objects still sitting at step one of the
+                    #   handshake. ``/auth`` appends a User to ``trt.users``
+                    #   *before* redirecting to Spotify, and nothing reaps the
+                    #   ones that never come back — an abandoned consent
+                    #   screen, a crawler, a probe. Their ``spotify_profile``
+                    #   is still ``None`` (see ``user.User.__init__``). They
+                    #   own no account, so they can never duplicate the
+                    #   account that just logged in.
+                    # * A ``user`` whose own profile somehow failed to load,
+                    #   where every comparison would be meaningless anyway.
+                    #
+                    # Subscripting those directly raises ``TypeError``, which
+                    # is not a ``KeyError``/``ValueError`` and so escapes the
+                    # handler as an HTTP 500. That turned a single abandoned
+                    # ``/auth`` hit into a permanent "login is broken" for
+                    # everyone, since the poisoned entry never aged out.
+                    current_profile = user.spotify_profile
+                    current_spotify_id = (
+                        current_profile.get("id") if isinstance(current_profile, dict) else None
+                    )
 
-                        try:
-                            if prev_user.spotify_profile["id"] == user.spotify_profile["id"]:
+                    if current_spotify_id is not None:
+                        for prev_user in list(self.trt.users):
+                            if prev_user is user:
+                                continue
+
+                            prev_profile = prev_user.spotify_profile
+                            if not isinstance(prev_profile, dict):
+                                continue
+
+                            if prev_profile.get("id") != current_spotify_id:
+                                continue
+
+                            try:
                                 self.trt.users.remove(prev_user)
-                        except (KeyError, ValueError):
-                            continue
+                            except ValueError:
+                                # Already gone (concurrent login for the same
+                                # account); nothing left to do for this entry.
+                                continue
 
                     return_to = request.cookies.get("auth_return_to", "/successful_auth")
                     if (

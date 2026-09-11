@@ -197,7 +197,20 @@ class User:
             self.refresh_token = data["refresh_token"]
             self.last_refresh = datetime.datetime.now(datetime.UTC)
 
-            await self.users_profile()
+            # The profile load is part of the contract, not a nice-to-have:
+            # ``spotify_profile`` is what identifies this session's account,
+            # and ``server._set_auth_cookie`` refuses to mint a JWT without
+            # it. Reporting success here while the profile is still ``None``
+            # produced a login that appeared to work and then silently
+            # dropped the user back on the login page — and, before the
+            # callback was hardened, a 500. Propagate the failure instead.
+            if not await self.users_profile():
+                logger.error(
+                    "Spotify token exchange succeeded but /v1/me did not return a profile; "
+                    "treating the login as failed."
+                )
+                return False
+
             return True
 
     async def refresh_tokens(self):
@@ -575,10 +588,23 @@ class User:
 
         headers = await self.auth_headers()
         if headers is None:
+            logger.error("Cannot load the Spotify profile: no usable access token.")
             return False
         session = await self.aiohttp_session()
         async with session.get(user_profile_url, headers=headers) as response:
             if response.status != 200:
+                # Log the status and body, because the failure modes here are
+                # not interchangeable and the bare ``return False`` made them
+                # impossible to tell apart from the logs: 429 is rate
+                # limiting, 5xx is Spotify being down, 401 means the token we
+                # were just handed is already being rejected.
+                #
+                # Note what a failure here does *not* mean. An app still in
+                # development mode rejects non-allow-listed accounts at the
+                # /authorize step, so they never reach the token exchange and
+                # never reach this call at all. By the time we are here, a
+                # code was issued and successfully traded for tokens.
+                logger.error(f"Spotify /v1/me returned {response.status}: {await response.text()}")
                 return False
 
             self.spotify_profile = await response.json(content_type=None)
