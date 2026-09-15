@@ -1,4 +1,22 @@
-# thatradiothing
+# that radio thing
+
+> [!NOTE]
+>
+> ### Project status — September 2026
+>
+> **That Radio Thing is being retired as part of duudey and released publicly as a self-hosted project.**
+>
+> The roots of this project go back to **2012**, when duudey was a small internet radio station streaming music directly through **Icecast**. That model eventually became impractical after our residing country brought internet radio broadcasting under **special licensing**. Rather than keep transmitting audio ourselves, the idea was reinvented around **2019** as *That Radio Thing*: **where every listener plays music through their own Spotify account and device, while this service synchronizes the track and playback position between them.**
+>
+> That Radio Thing still works, but Spotify's current API access model has now created a different limit: Development Mode applications are restricted to **5 authorized users**. That makes the project unsuitable as a public duudey service, but still perfectly usable as a private synchronized listening room for a small group.
+>
+> Going out of development mode became somewhat impossible since Spotify requires 250,000 monthly active users to even consider an application. Creating a chicken and egg problem.
+>
+> Rather than let the project and its history disappear, I'm leaving it here as a self-hosted project for anyone who still finds it useful.
+>
+> **The existing README below remains the technical documentation for the project.**
+
+---
 
 Real-time Spotify playback sync. One "master" listener's current track
 and position is mirrored to every other listener's active Spotify device,
