@@ -25,11 +25,9 @@ different rooms, houses, and accounts.
 
 Ships as a single `aiohttp` service with a Socket.IO gateway for
 real-time status push, the legacy Vue listener, and a standalone React
-administration application. Auth is
-JWT-based and designed to share a session with the sibling site
-[duudey.com](https://duudey.com) — logging into one logs you into the
-other, and a user's Spotify tokens are refreshed symmetrically from
-whichever side happens to handle the next request.
+administration application. Authentication is JWT-based and was originally
+designed to integrate with [duudey.com](https://duudey.com) through shared
+authentication and Spotify OAuth infrastructure.
 
 ## How the sync works
 
@@ -110,29 +108,14 @@ python main.py
 required. Required env vars raise a clear error on startup if missing
 (`SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET`, `AUTH_SHARED_JWT_SECRET`).
 
-## Shared SSO with duudey.com
+## Duudey integration
 
-Both sites set an HttpOnly cookie named `duudey_auth` on
-`Domain=.duudey.com`, signed with the same HS256 secret
-(`AUTH_SHARED_JWT_SECRET`). The JWT contains the Spotify
-`access_token` + `refresh_token` so either side can:
+That Radio Thing was originally built as part of the broader duudey ecosystem.
+The two services supported shared JWT authentication and Spotify OAuth sessions,
+allowing users to move between them without signing in again.
 
-- Verify the session locally (no RPC per request),
-- Refresh the Spotify token against Spotify when it nears expiry,
-- Rotate the cookie with `Set-Cookie`, which the other side sees on
-  its next request.
-
-The companion `duudey.com` repository contains the shared-auth design diary.
-The short version:
-
-- **Only `/logout` clears the cookie** — refresh paths never do, not
-  even on `invalid_grant`.
-- **Cookie attributes (`Domain`, `Path`, `SameSite`, `Secure`,
-  `HttpOnly`, `Max-Age`) always reuse the login-time config** so the
-  browser replaces the cookie instead of creating a duplicate.
-- **Both sites must share the same Spotify app** (`SPOTIFY_CLIENT_ID`
-  / `SPOTIFY_CLIENT_SECRET`) and request a superset of each other's
-  OAuth scopes for the tokens to be interchangeable.
+The self-hosted project does not depend on duudey; authentication can be
+configured independently through `.env`.
 
 ### Configuration reference
 
@@ -141,17 +124,17 @@ Most notable:
 
 | Variable                   | Purpose                                                                |
 | -------------------------- | ---------------------------------------------------------------------- |
-| `SPOTIFY_CLIENT_ID/SECRET` | Spotify app credentials (must match duudey.com).                       |
+| `SPOTIFY_CLIENT_ID/SECRET` | Spotify application credentials.                                       |
 | `TRT_URL`                  | Public URL (used as OAuth `redirect_uri` base).                        |
 | `TRT_PORT`                 | Listen port (default 33408).                                           |
 | `TRT_MASTERS_LIST`         | Comma-separated Spotify user IDs allowed to become master.             |
 | `TRT_ADMIN_IDS`            | Comma-separated Spotify user IDs allowed to manage schedules/AutoDJ.   |
-| `TRT_SCOPES`               | Comma-separated OAuth scopes; must be a superset of duudey.com's.      |
+| `TRT_SCOPES`               | Comma-separated Spotify OAuth scopes.                                  |
 | `TRT_PLAYLISTS`            | JSON array of `{"uri": …}` for the AutoDJ bot.                         |
 | `TRT_DATABASE_PATH`        | Durable SQLite path (defaults to `./data/thatradiothing.sqlite3`).      |
 | `TRT_SCHEDULE_TIMEZONE`    | IANA timezone used as the schedule editor default.                     |
-| `AUTH_SHARED_JWT_SECRET`   | HS256 secret — **must be identical to duudey.com's**.                  |
-| `AUTH_COOKIE_DOMAIN`       | `.duudey.com` so the cookie is readable from both subdomains.          |
+| `AUTH_SHARED_JWT_SECRET`   | Secret used to sign authentication JWTs; can be shared for SSO.        |
+| `AUTH_COOKIE_DOMAIN`       | Cookie domain used by the authentication session.                      |
 | `CORS_ALLOWED_ORIGINS`     | Comma-separated origins allowed to call the API with credentials.     |
 | `LOG_FILE`                 | Absolute path for rotating logs; empty disables file logging.          |
 
@@ -170,7 +153,7 @@ All endpoints live on the aiohttp app; `*` means cookie auth required:
 | `/profile` \*                 | GET     | User profile + master flags.                    |
 | `/devices` \*                 | GET/POST | List / select active Spotify device.           |
 | `/master` \*                  | POST    | Claim master role.                              |
-| `/resign` \*                  | POST    | Relinquish master role.                         |
+| `/resign` \*                 | POST    | Relinquish master role.                         |
 | `/enable` / `/disable` \*     | POST    | Opt in / out of the sync loop.                  |
 | `/api/now_playing`            | GET     | Public: current master track (unauth).         |
 | `/users` \*                   | GET     | Master-only: all sessions.                      |
